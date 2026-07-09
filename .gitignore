@@ -1,0 +1,37 @@
+# Gradle / Android
+.gradle/
+.gradle-local/
+build/
+app/build/
+local.properties
+
+# Xcode / Swift
+DerivedData/
+.derived/
+.swiftpm/
+.build/
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# Secrets / env
+.env
+*.keystore
+*.jks
+GoogleService-Info.plist
+google-services.json
+
+# Xcode local derived data
+.derivedData-local/
+
+# Node
+node_modules/
+functions/node_modules/
+
+# Swift Package / Xcode cache folders
+.sourcepackages/
+.derivedData/
+DerivedData/

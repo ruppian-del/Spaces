@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "256327101756",
+    "project_id": "spaces-by-circl",
+    "storage_bucket": "spaces-by-circl.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:256327101756:android:e76bf6bfd0696ddc6d4239",
+        "android_client_info": {
+          "package_name": "com.ianrupp.spaces"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "256327101756-uic43m31voifvlv16egkoce918toumv6.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.ianrupp.spaces",
+            "certificate_hash": "4fa9559a4baff7072b2e23d6b5eb6c82b099676a"
+          }
+        },
+        {
+          "client_id": "256327101756-ed0kpvl9867a7pmk1ei0od892p3mmi0q.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBUCZGX6Om-RANAwJvXg1Ihav7f05Ne2vw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "256327101756-ed0kpvl9867a7pmk1ei0od892p3mmi0q.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "256327101756-38oijkspvnnavts4t2cv6erpk9l0lr58.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.ianrupp.spaces"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

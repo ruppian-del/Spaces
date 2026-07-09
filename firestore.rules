@@ -1,0 +1,797 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function spaceDoc(spaceId) {
+      return get(/databases/$(database)/documents/spaces/$(spaceId));
+    }
+
+    function isSpaceMember(spaceId) {
+      return signedIn() && request.auth.uid in spaceDoc(spaceId).data.memberIds;
+    }
+
+    function memberDoc(spaceId, userId) {
+      return get(/databases/$(database)/documents/spaces/$(spaceId)/members/$(userId));
+    }
+
+    function pingDoc(pingId) {
+      return get(/databases/$(database)/documents/pings/$(pingId));
+    }
+
+    function isPingParticipant(pingId) {
+      return signedIn() && request.auth.uid in pingDoc(pingId).data.participantIds;
+    }
+
+    function pollDoc(spaceId, pollId) {
+      return get(/databases/$(database)/documents/spaces/$(spaceId)/polls/$(pollId));
+    }
+
+    function validRoleValue(role) {
+      return role in ["owner", "admin", "moderator", "member", "guest"];
+    }
+
+    function validPermissionValue(permission) {
+      return permission in [
+        "manage_space_settings",
+        "manage_members",
+        "manage_roles",
+        "manage_modules",
+        "invite_members",
+        "remove_members",
+        "post_pings",
+        "create_events",
+        "upload_photos_videos",
+        "upload_files",
+        "edit_own_content",
+        "delete_own_content",
+        "delete_others_content",
+        "view_content"
+      ];
+    }
+
+    function defaultRoleHasPermission(role, permission) {
+      return role == "owner"
+        || (
+          role == "admin"
+          && permission in [
+            "manage_members",
+            "manage_roles",
+            "manage_modules",
+            "invite_members",
+            "remove_members",
+            "post_pings",
+            "create_events",
+            "upload_photos_videos",
+            "upload_files",
+            "edit_own_content",
+            "delete_own_content",
+            "delete_others_content",
+            "view_content"
+          ]
+        )
+        || (
+          role == "moderator"
+          && permission in [
+            "post_pings",
+            "create_events",
+            "upload_photos_videos",
+            "upload_files",
+            "edit_own_content",
+            "delete_own_content",
+            "delete_others_content",
+            "view_content"
+          ]
+        )
+        || (
+          role == "member"
+          && permission in [
+            "post_pings",
+            "create_events",
+            "upload_photos_videos",
+            "upload_files",
+            "edit_own_content",
+            "delete_own_content",
+            "view_content"
+          ]
+        )
+        || (
+          role == "guest"
+          && permission == "view_content"
+        );
+    }
+
+    function memberHasPermission(spaceId, userId, permission) {
+      return userId == spaceDoc(spaceId).data.ownerId
+        || defaultRoleHasPermission(memberDoc(spaceId, userId).data.role, permission);
+    }
+
+    function memberRole(spaceId, userId) {
+      return userId == spaceDoc(spaceId).data.ownerId
+        ? "owner"
+        : memberDoc(spaceId, userId).data.role;
+    }
+
+    function canRemoveRole(actorRole, targetRole, isTargetOwner) {
+      return !isTargetOwner
+        && (
+          actorRole == "owner"
+          || (actorRole == "admin" && targetRole != "admin")
+        );
+    }
+
+    function canAssignRole(actorRole, targetRole, newRole, isTargetOwner) {
+      return !isTargetOwner
+        && newRole != "owner"
+        && (
+          (actorRole == "owner" && targetRole != "owner")
+          || (
+            actorRole == "admin"
+            && targetRole in ["moderator", "member", "guest"]
+            && newRole in ["moderator", "member", "guest"]
+          )
+        );
+    }
+
+    function currentUserHasPermission(spaceId, permission) {
+      return isSpaceMember(spaceId)
+        && validPermissionValue(permission)
+        && memberHasPermission(spaceId, request.auth.uid, permission);
+    }
+
+    function currentUserCanRemoveMember(spaceId, userId) {
+      return isSpaceMember(spaceId)
+        && canRemoveRole(
+          memberRole(spaceId, request.auth.uid),
+          memberRole(spaceId, userId),
+          userId == spaceDoc(spaceId).data.ownerId
+        );
+    }
+
+    function currentUserCanChangeMemberRole(spaceId, userId, newRole) {
+      return isSpaceMember(spaceId)
+        && validRoleValue(newRole)
+        && canAssignRole(
+          memberRole(spaceId, request.auth.uid),
+          memberRole(spaceId, userId),
+          newRole,
+          userId == spaceDoc(spaceId).data.ownerId
+        );
+    }
+
+    function validMemberDocument(userId) {
+      return request.resource.data.userId == userId
+        && request.resource.data.displayName is string
+        && request.resource.data.emojiAvatar is string
+        && validRoleValue(request.resource.data.role);
+    }
+
+    function validSpaceInviteWrite(inviteId) {
+      return request.resource.data.code == inviteId
+        && request.resource.data.spaceId is string
+        && request.resource.data.spaceName is string
+        && request.resource.data.spaceEmoji is string
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.maxUses is int
+        && request.resource.data.usedCount is int
+        && request.resource.data.active is bool;
+    }
+
+    function validSpaceFileCreate(spaceId, fileId) {
+      return request.resource.data.id == fileId
+        && request.resource.data.spaceId == spaceId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.mimeType is string
+        && request.resource.data.fileExtension is string
+        && request.resource.data.storagePath is string
+        && request.resource.data.storagePath.size() > 0
+        && request.resource.data.encryptionVersion == "aes-gcm-v1"
+        && request.resource.data.nonceBase64 is string
+        && request.resource.data.nonceBase64.size() > 0
+        && request.resource.data.uploadedBy == request.auth.uid
+        && request.resource.data.uploadedByName is string
+        && request.resource.data.fileSize is int
+        && request.resource.data.deleted == false;
+    }
+
+    function validSpaceFileManageUpdate(spaceId) {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.mimeType == resource.data.mimeType
+        && request.resource.data.fileExtension == resource.data.fileExtension
+        && request.resource.data.storagePath == resource.data.storagePath
+        && request.resource.data.encryptionVersion == resource.data.encryptionVersion
+        && request.resource.data.nonceBase64 == resource.data.nonceBase64
+        && request.resource.data.uploadedBy == resource.data.uploadedBy
+        && request.resource.data.uploadedByName == resource.data.uploadedByName
+        && request.resource.data.fileSize == resource.data.fileSize
+        && request.resource.data.createdAt == resource.data.createdAt
+        && (
+          resource.data.uploadedBy == request.auth.uid
+          || currentUserHasPermission(spaceId, "delete_others_content")
+        );
+    }
+
+    function validTextMessageCreate(spaceId, messageId) {
+      return request.resource.data.id == messageId
+        && request.resource.data.spaceId == spaceId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.type == "text"
+        && request.resource.data.status == "sent"
+        && request.resource.data.deleted == false
+        && request.resource.data.encryptionVersion == "aes-gcm-v1"
+        && request.resource.data.ciphertextBase64 is string
+        && request.resource.data.ciphertextBase64.size() > 0
+        && request.resource.data.nonceBase64 is string
+        && request.resource.data.nonceBase64.size() > 0;
+    }
+
+    function validTextMessageEdit(spaceId) {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.senderId == resource.data.senderId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.type == "text"
+        && request.resource.data.senderName == resource.data.senderName
+        && request.resource.data.senderEmoji == resource.data.senderEmoji
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.encryptionVersion == resource.data.encryptionVersion
+        && request.resource.data.deleted == resource.data.deleted
+        && request.resource.data.ciphertextBase64 is string
+        && request.resource.data.ciphertextBase64.size() > 0
+        && request.resource.data.nonceBase64 is string
+        && request.resource.data.nonceBase64.size() > 0
+        && request.resource.data.edited == true;
+    }
+
+    function validMessageSoftDelete(spaceId) {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.senderId == resource.data.senderId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.senderName == resource.data.senderName
+        && request.resource.data.senderEmoji == resource.data.senderEmoji
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.encryptionVersion == resource.data.encryptionVersion
+        && request.resource.data.deleted == true
+        && request.resource.data.deletedBy == request.auth.uid
+        && request.resource.data.text == ""
+        && request.resource.data.ciphertextBase64 == ""
+        && request.resource.data.nonceBase64 == ""
+        && (!("captionCiphertextBase64" in request.resource.data) || request.resource.data.captionCiphertextBase64 == "")
+        && (!("captionNonceBase64" in request.resource.data) || request.resource.data.captionNonceBase64 == "")
+        && (!("mediaStoragePath" in request.resource.data) || request.resource.data.mediaStoragePath == "")
+        && (!("thumbnailStoragePath" in request.resource.data) || request.resource.data.thumbnailStoragePath == "")
+        && (!("mediaNonceBase64" in request.resource.data) || request.resource.data.mediaNonceBase64 == "")
+        && (!("thumbnailNonceBase64" in request.resource.data) || request.resource.data.thumbnailNonceBase64 == "")
+        && (
+          resource.data.senderId == request.auth.uid
+          || currentUserHasPermission(spaceId, "delete_others_content")
+        );
+    }
+
+    function validPingCreate(pingId) {
+      return request.resource.data.id == pingId
+        && request.auth.uid in request.resource.data.participantIds
+        && request.resource.data.participantIds is list
+        && request.resource.data.participantIds.size() == 2
+        && request.resource.data.participantNames is list
+        && request.resource.data.participantNames.size() == 2
+        && request.resource.data.participantEmojis is list
+        && request.resource.data.participantEmojis.size() == 2;
+    }
+
+    function validPingTextMessageCreate(pingId, messageId) {
+      return request.resource.data.id == messageId
+        && request.resource.data.pingId == pingId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.type == "text"
+        && request.resource.data.status == "sent"
+        && request.resource.data.deleted == false
+        && request.resource.data.encryptionVersion == "aes-gcm-v1"
+        && request.resource.data.ciphertextBase64 is string
+        && request.resource.data.ciphertextBase64.size() > 0
+        && request.resource.data.nonceBase64 is string
+        && request.resource.data.nonceBase64.size() > 0;
+    }
+
+    function validPingMetadataUpdate() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.participantIds == resource.data.participantIds
+        && request.resource.data.participantNames == resource.data.participantNames
+        && request.resource.data.participantEmojis == resource.data.participantEmojis
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validPingMessageSoftDelete() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.pingId == resource.data.pingId
+        && request.resource.data.senderId == resource.data.senderId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.senderName == resource.data.senderName
+        && request.resource.data.senderEmoji == resource.data.senderEmoji
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.encryptionVersion == resource.data.encryptionVersion
+        && request.resource.data.deleted == true
+        && request.resource.data.deletedBy == request.auth.uid
+        && request.resource.data.ciphertextBase64 == ""
+        && request.resource.data.nonceBase64 == "";
+    }
+
+    function validPingMessageEdit() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.pingId == resource.data.pingId
+        && request.resource.data.senderId == resource.data.senderId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.senderName == resource.data.senderName
+        && request.resource.data.senderEmoji == resource.data.senderEmoji
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.type == "text"
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.deleted == resource.data.deleted
+        && request.resource.data.encryptionVersion == resource.data.encryptionVersion
+        && request.resource.data.ciphertextBase64 is string
+        && request.resource.data.ciphertextBase64.size() > 0
+        && request.resource.data.nonceBase64 is string
+        && request.resource.data.nonceBase64.size() > 0
+        && request.resource.data.edited == true;
+    }
+
+    function validReactionWrite(userId) {
+      return request.auth.uid == userId
+        && request.resource.data.userId == userId
+        && request.resource.data.emoji is string
+        && request.resource.data.emoji.size() > 0;
+    }
+
+    function validImageMessageCreate(spaceId, messageId) {
+      return request.resource.data.id == messageId
+        && request.resource.data.spaceId == spaceId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.type == "image"
+        && request.resource.data.status == "sent"
+        && request.resource.data.deleted == false
+        && request.resource.data.encryptionVersion == "aes-gcm-v1"
+        && request.resource.data.mediaStoragePath is string
+        && request.resource.data.mediaStoragePath.size() > 0
+        && request.resource.data.thumbnailStoragePath is string
+        && request.resource.data.thumbnailStoragePath.size() > 0
+        && request.resource.data.mediaNonceBase64 is string
+        && request.resource.data.mediaNonceBase64.size() > 0
+        && request.resource.data.thumbnailNonceBase64 is string
+        && request.resource.data.thumbnailNonceBase64.size() > 0
+        && (!("captionCiphertextBase64" in request.resource.data) || request.resource.data.captionCiphertextBase64 is string)
+        && (!("captionNonceBase64" in request.resource.data) || request.resource.data.captionNonceBase64 is string)
+        && (!("mediaCategory" in request.resource.data) || request.resource.data.mediaCategory is string);
+    }
+
+    function validPollCreate(spaceId, pollId) {
+      return request.resource.data.id == pollId
+        && request.resource.data.spaceId == spaceId
+        && request.resource.data.question is string
+        && request.resource.data.question.size() > 0
+        && request.resource.data.options is list
+        && request.resource.data.options.size() >= 2
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.allowMultipleVotes is bool
+        && request.resource.data.anonymous is bool
+        && request.resource.data.deleted == false;
+    }
+
+    function validPollDeleteUpdate(spaceId) {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.question == resource.data.question
+        && request.resource.data.options == resource.data.options
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.allowMultipleVotes == resource.data.allowMultipleVotes
+        && request.resource.data.anonymous == resource.data.anonymous
+        && request.resource.data.deleted == true
+        && (
+          resource.data.createdBy == request.auth.uid
+          || currentUserHasPermission(spaceId, "delete_others_content")
+        );
+    }
+
+    function validPollVoteWrite(spaceId, pollId, userId) {
+      return request.resource.data.userId == request.auth.uid
+        && request.auth.uid == userId
+        && request.resource.data.optionIds is list
+        && request.resource.data.optionIds.size() > 0
+        && !pollDoc(spaceId, pollId).data.deleted
+        && (
+          !(pollDoc(spaceId, pollId).data.closesAt is timestamp)
+          || request.time < pollDoc(spaceId, pollId).data.closesAt
+        );
+    }
+
+    function validEventCreate(spaceId, eventId) {
+      return request.resource.data.id == eventId
+        && request.resource.data.spaceId == spaceId
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.description is string
+        && request.resource.data.location is string
+        && request.resource.data.startDate is timestamp
+        && request.resource.data.endDate is timestamp
+        && request.resource.data.endDate >= request.resource.data.startDate
+        && request.resource.data.allDay is bool
+        && request.resource.data.timezone is string
+        && request.resource.data.timezone.size() > 0
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.deleted == false;
+    }
+
+    function validEventUpdate(spaceId) {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.description is string
+        && request.resource.data.location is string
+        && request.resource.data.startDate is timestamp
+        && request.resource.data.endDate is timestamp
+        && request.resource.data.endDate >= request.resource.data.startDate
+        && request.resource.data.allDay is bool
+        && request.resource.data.timezone is string
+        && request.resource.data.timezone.size() > 0
+        && request.resource.data.deleted == resource.data.deleted
+        && (
+          resource.data.createdBy == request.auth.uid
+          || currentUserHasPermission(spaceId, "delete_others_content")
+        );
+    }
+
+    function validEventSoftDelete(spaceId) {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.location == resource.data.location
+        && request.resource.data.startDate == resource.data.startDate
+        && request.resource.data.endDate == resource.data.endDate
+        && request.resource.data.allDay == resource.data.allDay
+        && request.resource.data.timezone == resource.data.timezone
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.deleted == true
+        && (
+          resource.data.createdBy == request.auth.uid
+          || currentUserHasPermission(spaceId, "delete_others_content")
+        );
+    }
+
+    function validActivityCreate(activityId) {
+      return request.resource.data.id == activityId
+        && request.resource.data.spaceId is string
+        && isSpaceMember(request.resource.data.spaceId)
+        && request.resource.data.spaceName is string
+        && request.resource.data.spaceEmoji is string
+        && request.resource.data.actorId == request.auth.uid
+        && request.resource.data.actorName is string
+        && request.resource.data.type is string
+        && request.resource.data.title is string
+        && request.resource.data.readBy is list
+        && request.resource.data.visibleTo is list
+        && request.auth.uid in request.resource.data.readBy;
+    }
+
+    function validActivityReadUpdate() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.spaceName == resource.data.spaceName
+        && request.resource.data.spaceEmoji == resource.data.spaceEmoji
+        && request.resource.data.actorId == resource.data.actorId
+        && request.resource.data.actorName == resource.data.actorName
+        && request.resource.data.actorEmoji == resource.data.actorEmoji
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.subtitle == resource.data.subtitle
+        && request.resource.data.targetId == resource.data.targetId
+        && request.resource.data.targetType == resource.data.targetType
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.readBy is list
+        && request.auth.uid in request.resource.data.readBy;
+    }
+
+    function validNotificationCreate(notificationId) {
+      return request.resource.data.id == notificationId
+        && request.resource.data.recipientId is string
+        && request.resource.data.recipientId != request.auth.uid
+        && request.resource.data.actorId == request.auth.uid
+        && request.resource.data.actorName is string
+        && request.resource.data.spaceId is string
+        && (
+          (
+            request.resource.data.type != "ping"
+            && request.resource.data.type != "pingMessage"
+            && isSpaceMember(request.resource.data.spaceId)
+            && request.resource.data.recipientId in spaceDoc(request.resource.data.spaceId).data.memberIds
+          )
+          || (
+            request.resource.data.type == "ping"
+            && isPingParticipant(request.resource.data.spaceId)
+            && request.resource.data.recipientId in pingDoc(request.resource.data.spaceId).data.participantIds
+          )
+          || (
+            request.resource.data.type == "pingMessage"
+            && request.resource.data.spaceId == ""
+            && request.resource.data.targetId is string
+            && request.resource.data.targetId.size() > 0
+            && request.resource.data.targetType == "ping"
+            && isPingParticipant(request.resource.data.targetId)
+            && request.resource.data.recipientId in pingDoc(request.resource.data.targetId).data.participantIds
+          )
+        )
+        && request.resource.data.spaceName is string
+        && request.resource.data.spaceEmoji is string
+        && request.resource.data.type is string
+        && request.resource.data.title is string
+        && request.resource.data.read is bool
+        && request.resource.data.delivered is bool;
+    }
+
+    function validNotificationReadUpdate() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.recipientId == resource.data.recipientId
+        && request.resource.data.recipientId == request.auth.uid
+        && request.resource.data.actorId == resource.data.actorId
+        && request.resource.data.actorName == resource.data.actorName
+        && request.resource.data.actorEmoji == resource.data.actorEmoji
+        && request.resource.data.spaceId == resource.data.spaceId
+        && request.resource.data.spaceName == resource.data.spaceName
+        && request.resource.data.spaceEmoji == resource.data.spaceEmoji
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.subtitle == resource.data.subtitle
+        && request.resource.data.targetId == resource.data.targetId
+        && request.resource.data.targetType == resource.data.targetType
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.delivered == resource.data.delivered
+        && request.resource.data.deliveredAt == resource.data.deliveredAt
+        && request.resource.data.read == true;
+    }
+
+    function validPushTokenWrite(userId, tokenId) {
+      return request.auth.uid == userId
+        && request.resource.data.id == tokenId
+        && request.resource.data.userId == userId
+        && request.resource.data.token is string
+        && request.resource.data.token.size() > 0
+        && request.resource.data.platform in ["ios", "android"]
+        && request.resource.data.enabled is bool;
+    }
+
+    match /spaces/{spaceId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.memberIds;
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.memberIds is list
+        && request.auth.uid in request.resource.data.memberIds;
+      allow update: if isSpaceMember(spaceId);
+
+      match /members/{userId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create: if signedIn()
+          && request.auth.uid == userId
+          && validMemberDocument(userId);
+        allow update: if isSpaceMember(spaceId)
+          && validMemberDocument(userId)
+          && currentUserCanChangeMemberRole(spaceId, userId, request.resource.data.role);
+        allow delete: if currentUserCanRemoveMember(spaceId, userId);
+      }
+
+      match /encryption/{docId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create, update: if isSpaceMember(spaceId)
+          && docId == "key"
+          && request.resource.data.keyVersion == "aes-gcm-v1"
+          && request.resource.data.keyBase64 is string
+          && request.resource.data.keyBase64.size() > 0
+          && request.resource.data.createdBy == request.auth.uid;
+        allow delete: if false;
+      }
+
+      match /memberKeys/{legacyMemberKeyId} {
+        allow read: if isSpaceMember(spaceId) && resource.data.userId == request.auth.uid;
+        allow create, update: if isSpaceMember(spaceId)
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.wrappedKey is string
+          && request.resource.data.wrappedKey.size() > 0;
+        allow delete: if false;
+      }
+
+      match /memberKeys/{userId}/devices/{deviceId} {
+        allow read: if isSpaceMember(spaceId) && request.auth.uid == userId;
+        allow create, update: if isSpaceMember(spaceId)
+          && request.resource.data.userId == userId
+          && request.resource.data.deviceId == deviceId
+          && request.resource.data.publicKey is string
+          && request.resource.data.publicKey.size() > 0
+          && request.resource.data.encryptedSpaceKeyForDevice is string
+          && request.resource.data.encryptedSpaceKeyForDevice.size() > 0
+          && request.resource.data.wrappedByUserId == request.auth.uid;
+        allow delete: if false;
+      }
+
+      match /messages/{messageId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create: if isSpaceMember(spaceId)
+          && (
+            (
+              currentUserHasPermission(spaceId, "post_pings")
+              && validTextMessageCreate(spaceId, messageId)
+            )
+            || (
+              currentUserHasPermission(spaceId, "upload_photos_videos")
+              && validImageMessageCreate(spaceId, messageId)
+            )
+          );
+        allow update: if isSpaceMember(spaceId)
+          && (
+            validTextMessageEdit(spaceId)
+            || validMessageSoftDelete(spaceId)
+          );
+        allow delete: if false;
+
+        match /reactions/{userId} {
+          allow read: if isSpaceMember(spaceId);
+          allow create, update: if isSpaceMember(spaceId) && validReactionWrite(userId);
+          allow delete: if isSpaceMember(spaceId) && request.auth.uid == userId;
+        }
+      }
+
+      match /polls/{pollId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create: if isSpaceMember(spaceId)
+          && validPollCreate(spaceId, pollId);
+        allow update: if isSpaceMember(spaceId)
+          && validPollDeleteUpdate(spaceId);
+        allow delete: if false;
+
+        match /votes/{userId} {
+          allow read: if isSpaceMember(spaceId);
+          allow create, update: if isSpaceMember(spaceId)
+            && validPollVoteWrite(spaceId, pollId, userId);
+          allow delete: if false;
+        }
+      }
+
+      match /events/{eventId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create: if isSpaceMember(spaceId)
+          && currentUserHasPermission(spaceId, "create_events")
+          && validEventCreate(spaceId, eventId);
+        allow update: if isSpaceMember(spaceId)
+          && (validEventUpdate(spaceId) || validEventSoftDelete(spaceId));
+        allow delete: if false;
+      }
+
+      match /fileFolders/{folderId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create, update, delete: if currentUserHasPermission(spaceId, "manage_modules");
+      }
+
+      match /files/{fileId} {
+        allow read: if isSpaceMember(spaceId);
+        allow create: if isSpaceMember(spaceId)
+          && currentUserHasPermission(spaceId, "upload_files")
+          && validSpaceFileCreate(spaceId, fileId);
+        allow update: if isSpaceMember(spaceId)
+          && validSpaceFileManageUpdate(spaceId);
+        allow delete: if false;
+      }
+    }
+
+    match /spaceInvites/{inviteId} {
+      allow read: if signedIn()
+        && (
+          (resource.data.spaceId is string && isSpaceMember(resource.data.spaceId))
+          || resource.data.active == true
+        );
+      allow create: if signedIn()
+        && validSpaceInviteWrite(inviteId)
+        && currentUserHasPermission(request.resource.data.spaceId, "invite_members");
+      allow update: if signedIn()
+        && validSpaceInviteWrite(inviteId)
+        && currentUserHasPermission(resource.data.spaceId, "invite_members");
+      allow delete: if false;
+    }
+
+    match /pings/{pingId} {
+      allow read: if isPingParticipant(pingId);
+      allow create: if signedIn() && validPingCreate(pingId);
+      allow update: if isPingParticipant(pingId) && validPingMetadataUpdate();
+      allow delete: if false;
+
+      match /encryption/{docId} {
+        allow read: if isPingParticipant(pingId);
+        allow create, update: if isPingParticipant(pingId)
+          && docId == "key"
+          && request.resource.data.keyVersion == "aes-gcm-v1"
+          && request.resource.data.keyBase64 is string
+          && request.resource.data.keyBase64.size() > 0
+          && request.resource.data.createdBy == request.auth.uid;
+        allow delete: if false;
+      }
+
+      match /messages/{messageId} {
+        allow read: if isPingParticipant(pingId);
+        allow create: if isPingParticipant(pingId)
+          && validPingTextMessageCreate(pingId, messageId);
+        allow update: if isPingParticipant(pingId)
+          && (validPingMessageSoftDelete() || validPingMessageEdit());
+        allow delete: if false;
+
+        match /reactions/{userId} {
+          allow read: if isPingParticipant(pingId);
+          allow create, update: if isPingParticipant(pingId) && validReactionWrite(userId);
+          allow delete: if isPingParticipant(pingId) && request.auth.uid == userId;
+        }
+      }
+    }
+
+    match /activity/{activityId} {
+      allow read: if signedIn() && isSpaceMember(resource.data.spaceId);
+      allow create: if signedIn() && validActivityCreate(activityId);
+      allow update: if signedIn()
+        && isSpaceMember(resource.data.spaceId)
+        && validActivityReadUpdate();
+      allow delete: if false;
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && resource.data.recipientId == request.auth.uid;
+      allow create: if signedIn() && validNotificationCreate(notificationId);
+      allow update: if signedIn() && validNotificationReadUpdate();
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.e2eePublicKey is string
+        && request.resource.data.e2eePublicKey.size() > 0;
+
+      match /devices/{deviceId} {
+        allow read: if signedIn();
+        allow create, update: if signedIn()
+          && request.auth.uid == userId
+          && request.resource.data.userId == userId
+          && request.resource.data.deviceId == deviceId
+          && request.resource.data.publicKey is string
+          && request.resource.data.publicKey.size() > 0;
+      }
+
+      match /pushTokens/{tokenId} {
+        allow read: if signedIn() && request.auth.uid == userId;
+        allow create, update: if signedIn()
+          && validPushTokenWrite(userId, tokenId);
+        allow delete: if false;
+      }
+    }
+  }
+}
