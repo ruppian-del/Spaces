@@ -196,16 +196,28 @@ fun SpaceSettingsScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (uiState.canManageModules) {
                             SettingToggleRow(
+                                label = "Events",
+                                checked = uiState.eventsEnabled,
+                                onCheckedChange = { viewModel.handleEventsToggle(context, it) },
+                                enabled = !uiState.isUpdatingEventsModule
+                            )
+                            SettingToggleRow(
                                 label = "Files",
                                 checked = uiState.filesEnabled,
-                                onCheckedChange = { viewModel.handleFilesToggle(context, it) }
+                                onCheckedChange = { viewModel.handleFilesToggle(context, it) },
+                                enabled = !uiState.isUpdatingFilesModule
                             )
                             SettingToggleRow(
                                 label = "Polls",
                                 checked = uiState.pollsEnabled,
-                                onCheckedChange = { viewModel.handlePollsToggle(context, it) }
+                                onCheckedChange = { viewModel.handlePollsToggle(context, it) },
+                                enabled = !uiState.isUpdatingPollsModule
                             )
                         } else {
+                            SettingValueRow(
+                                label = "Events",
+                                value = if (uiState.eventsEnabled) "Enabled" else "Disabled"
+                            )
                             SettingValueRow(
                                 label = "Files",
                                 value = if (uiState.filesEnabled) "Enabled" else "Disabled"
@@ -218,6 +230,14 @@ fun SpaceSettingsScreen(
 
                         Text(
                             text = buildString {
+                                append(
+                                    if (uiState.eventsEnabled) {
+                                        "Events can be disabled later. Existing events will be hidden, not deleted."
+                                    } else {
+                                        "Owners and admins can enable Events later when this Space needs planning and calendars."
+                                    }
+                                )
+                                append("\n\n")
                                 append(
                                     if (uiState.filesEnabled) {
                                         "Files can be disabled later. If files already exist, they will be hidden, not deleted."

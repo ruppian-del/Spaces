@@ -24,6 +24,10 @@ struct Space: Identifiable, Hashable {
         return resolvedModules
     }
 
+    var eventsEnabled: Bool {
+        enabledModules.contains(.events)
+    }
+
     var filesEnabled: Bool {
         enabledModules.contains(.files)
     }
@@ -46,7 +50,7 @@ enum SpaceModule: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .general: "General"
+        case .general: "Space Pings"
         case .photos: "Photos"
         case .files: "Files"
         case .polls: "Polls"
@@ -82,7 +86,7 @@ enum SpaceModule: String, CaseIterable, Identifiable, Hashable {
 
     var description: String {
         switch self {
-        case .general: "Daily conversations"
+        case .general: "Private conversations and quick check-ins"
         case .photos: "Shared photos and memes"
         case .files: "Shared documents and uploads"
         case .polls: "Questions and voting"
@@ -92,8 +96,16 @@ enum SpaceModule: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    static var requiredModules: [SpaceModule] {
+        [.general, .photos, .members]
+    }
+
+    static var optionalModules: [SpaceModule] {
+        [.events, .files, .polls]
+    }
+
     static var configurableModules: [SpaceModule] {
-        [.general, .photos, .files, .polls, .events, .members]
+        requiredModules + optionalModules
     }
 }
 
@@ -139,15 +151,15 @@ enum SpaceTemplate: String, CaseIterable, Identifiable {
     var defaultEnabledModules: [SpaceModule] {
         switch self {
         case .family:
-            return [.general, .photos, .events, .members]
+            return SpaceModule.requiredModules + [.events]
         case .friends:
-            return [.general, .photos, .events, .members]
+            return SpaceModule.requiredModules + [.events]
         case .business:
-            return [.general, .files, .events, .members]
+            return SpaceModule.requiredModules + [.events, .files]
         case .community:
-            return [.general, .files, .events, .members]
+            return SpaceModule.requiredModules + [.events, .files]
         case .custom:
-            return [.general, .members]
+            return SpaceModule.requiredModules
         }
     }
 }

@@ -13,8 +13,10 @@ final class SpaceSettingsViewModel: ObservableObject {
     @Published var allowMemberInvites: Bool
     @Published var isPrivateSpace: Bool
     @Published var safeModeEnabled: Bool
+    @Published private(set) var eventsEnabled: Bool
     @Published private(set) var filesEnabled: Bool
     @Published private(set) var pollsEnabled: Bool
+    @Published private(set) var isUpdatingEventsModule = false
     @Published private(set) var canManageModules = false
     @Published private(set) var canManageRoles = false
     @Published private(set) var canManageInvites = false
@@ -42,6 +44,7 @@ final class SpaceSettingsViewModel: ObservableObject {
         self.allowMemberInvites = true
         self.isPrivateSpace = true
         self.safeModeEnabled = true
+        self.eventsEnabled = space.eventsEnabled
         self.filesEnabled = space.filesEnabled
         self.pollsEnabled = space.pollsEnabled
     }
@@ -58,6 +61,7 @@ final class SpaceSettingsViewModel: ObservableObject {
         self.allowMemberInvites = true
         self.isPrivateSpace = true
         self.safeModeEnabled = true
+        self.eventsEnabled = space.eventsEnabled
         self.filesEnabled = space.filesEnabled
         self.pollsEnabled = space.pollsEnabled
     }
@@ -181,6 +185,28 @@ final class SpaceSettingsViewModel: ObservableObject {
         do {
             try await spaceService.setFilesEnabled(in: space, isEnabled: isEnabled)
             filesEnabled = isEnabled
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func handleEventsToggle(_ isEnabled: Bool) async {
+        guard canManageModules else {
+            eventsEnabled = space.eventsEnabled
+            return
+        }
+        guard isEnabled != eventsEnabled else { return }
+        await applyEventsToggle(isEnabled)
+    }
+
+    private func applyEventsToggle(_ isEnabled: Bool) async {
+        guard !isUpdatingEventsModule else { return }
+        isUpdatingEventsModule = true
+        defer { isUpdatingEventsModule = false }
+
+        do {
+            try await spaceService.setEventsEnabled(in: space, isEnabled: isEnabled)
+            eventsEnabled = isEnabled
         } catch {
             errorMessage = error.localizedDescription
         }

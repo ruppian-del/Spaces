@@ -20,6 +20,9 @@ data class Space(
     val modules: List<SpaceModule>
         get() = (enabledModules + SpaceModules.Settings).distinctBy { it.id }
 
+    val eventsEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Events.id }
+
     val filesEnabled: Boolean
         get() = enabledModules.any { it.id == SpaceModules.Files.id }
 
@@ -45,10 +48,10 @@ enum class SpaceTemplate(val title: String, val subtitle: String, val suggestedE
 
     val defaultEnabledModules: List<SpaceModule>
         get() = when (this) {
-            Family -> listOf(SpaceModules.General, SpaceModules.Photos, SpaceModules.Events, SpaceModules.Members)
-            Friends -> listOf(SpaceModules.General, SpaceModules.Photos, SpaceModules.Events, SpaceModules.Members)
-            Business -> listOf(SpaceModules.General, SpaceModules.Files, SpaceModules.Events, SpaceModules.Members)
-            Community -> listOf(SpaceModules.General, SpaceModules.Files, SpaceModules.Events, SpaceModules.Members)
-            Custom -> listOf(SpaceModules.General, SpaceModules.Members)
+            Family -> SpaceModules.required + listOf(SpaceModules.Events)
+            Friends -> SpaceModules.required + listOf(SpaceModules.Events)
+            Business -> SpaceModules.required + listOf(SpaceModules.Events, SpaceModules.Files)
+            Community -> SpaceModules.required + listOf(SpaceModules.Events, SpaceModules.Files)
+            Custom -> SpaceModules.required
         }
 }

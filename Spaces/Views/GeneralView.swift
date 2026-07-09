@@ -62,7 +62,7 @@ struct GeneralView: View {
                 .padding(.bottom, 12)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("General")
+            .navigationTitle("Space Pings")
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .bottom) {
                 composerBar

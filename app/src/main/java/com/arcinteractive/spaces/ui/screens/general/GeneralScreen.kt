@@ -121,7 +121,7 @@ fun GeneralScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("General") },
+                title = { Text("Space Pings") },
                 navigationIcon = {
                     IconButton(onClick = onBackPressed) {
                         Icon(

@@ -22,11 +22,13 @@ data class SpaceSettingsUiState(
     val spaceColor: SpaceColorOption,
     val spaceDescription: String,
     val templateType: SpaceTemplate,
+    val eventsEnabled: Boolean,
     val filesEnabled: Boolean,
     val pollsEnabled: Boolean,
     val canManageModules: Boolean = false,
     val canManageRoles: Boolean = false,
     val canManageInvites: Boolean = false,
+    val isUpdatingEventsModule: Boolean = false,
     val isUpdatingFilesModule: Boolean = false,
     val isUpdatingPollsModule: Boolean = false,
     val shouldConfirmHidingFiles: Boolean = false,
@@ -58,6 +60,7 @@ class SpaceSettingsViewModel(
             spaceColor = SpaceColorOption.entries.firstOrNull { it.hex == space.colorHex } ?: SpaceColorOption.Indigo,
             spaceDescription = space.subtitle,
             templateType = space.template,
+            eventsEnabled = space.eventsEnabled,
             filesEnabled = space.filesEnabled,
             pollsEnabled = space.pollsEnabled
         )
@@ -131,6 +134,15 @@ class SpaceSettingsViewModel(
             } else {
                 applyFilesToggle(context, true)
             }
+        }
+    }
+
+    fun handleEventsToggle(context: android.content.Context, isEnabled: Boolean) {
+        val currentState = _uiState.value
+        if (!currentState.canManageModules || currentState.eventsEnabled == isEnabled) return
+
+        viewModelScope.launch {
+            applyEventsToggle(context, isEnabled)
         }
     }
 
@@ -303,6 +315,27 @@ class SpaceSettingsViewModel(
                 it.copy(
                     isUpdatingFilesModule = false,
                     lastErrorMessage = error.localizedMessage ?: "Unable to update Files right now."
+                )
+            }
+        }
+    }
+
+    private suspend fun applyEventsToggle(context: android.content.Context, isEnabled: Boolean) {
+        _uiState.update { it.copy(isUpdatingEventsModule = true, lastErrorMessage = null) }
+        runCatching {
+            spaceService.setEventsEnabled(context, space, isEnabled)
+        }.onSuccess {
+            _uiState.update {
+                it.copy(
+                    isUpdatingEventsModule = false,
+                    eventsEnabled = isEnabled
+                )
+            }
+        }.onFailure { error ->
+            _uiState.update {
+                it.copy(
+                    isUpdatingEventsModule = false,
+                    lastErrorMessage = error.localizedMessage ?: "Unable to update Events right now."
                 )
             }
         }

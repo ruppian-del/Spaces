@@ -853,13 +853,37 @@ final class SpaceService {
 
         try await requirePermission(.manageModules, in: space, error: .invitePermissionDenied)
 
-        var enabledModules = space.enabledModules
+        var enabledModules = try await latestEnabledModules(in: space)
         if isEnabled {
             if !enabledModules.contains(.files) {
                 enabledModules.append(.files)
             }
         } else {
             enabledModules.removeAll { $0 == .files }
+        }
+
+        enabledModules = sanitizeEnabledModules(enabledModules, for: space.template)
+
+        try await updateData([
+            "enabledModules": enabledModules.map(\.id),
+            "updatedAt": FieldValue.serverTimestamp()
+        ], for: firestore.collection("spaces").document(space.id))
+    }
+
+    func setEventsEnabled(in space: Space, isEnabled: Bool) async throws {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+
+        try await requirePermission(.manageModules, in: space, error: .invitePermissionDenied)
+
+        var enabledModules = try await latestEnabledModules(in: space)
+        if isEnabled {
+            if !enabledModules.contains(.events) {
+                enabledModules.append(.events)
+            }
+        } else {
+            enabledModules.removeAll { $0 == .events }
         }
 
         enabledModules = sanitizeEnabledModules(enabledModules, for: space.template)
@@ -877,7 +901,7 @@ final class SpaceService {
 
         try await requirePermission(.manageModules, in: space, error: .invitePermissionDenied)
 
-        var enabledModules = space.enabledModules
+        var enabledModules = try await latestEnabledModules(in: space)
         if isEnabled {
             if !enabledModules.contains(.polls) {
                 enabledModules.append(.polls)
@@ -2089,35 +2113,27 @@ final class SpaceService {
 
     private func sanitizeEnabledModules(_ modules: [SpaceModule], for template: SpaceTemplate) -> [SpaceModule] {
         let requested = Set(modules.filter { $0 != .settings })
-        let baseModules: [SpaceModule]
+        var resolved = SpaceModule.requiredModules
 
-        switch template {
-        case .family, .friends:
-            baseModules = [.general, .photos, .events, .members]
-        case .business, .community:
-            baseModules = [.general, .events, .members]
-        case .custom:
-            baseModules = [.general]
-        }
-
-        var resolved = baseModules
-        if requested.contains(.photos), !resolved.contains(.photos) {
-            resolved.append(.photos)
-        }
-        if requested.contains(.files), !resolved.contains(.files) {
-            resolved.append(.files)
-        }
-        if requested.contains(.polls), !resolved.contains(.polls) {
-            resolved.append(.polls)
-        }
-        if requested.contains(.events), !resolved.contains(.events) {
-            resolved.append(.events)
-        }
-        if requested.contains(.members), !resolved.contains(.members) {
-            resolved.append(.members)
+        for module in SpaceModule.optionalModules where requested.contains(module) {
+            resolved.append(module)
         }
 
         return SpaceModule.configurableModules.filter { resolved.contains($0) }
+    }
+
+    private func latestEnabledModules(in space: Space) async throws -> [SpaceModule] {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+
+        let snapshot = try await getDocument(
+            firestore.collection("spaces").document(space.id)
+        )
+        guard let data = snapshot.data() else {
+            return sanitizeEnabledModules(space.enabledModules, for: space.template)
+        }
+        return parseEnabledModules(from: data, template: space.template)
     }
 
     private func parseEnabledModules(from data: [String: Any], template: SpaceTemplate) -> [SpaceModule] {

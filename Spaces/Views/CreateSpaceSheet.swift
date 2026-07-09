@@ -65,7 +65,17 @@ struct CreateSpaceSheet: View {
 
                 Section {
                     if viewModel.template == .custom {
-                        ForEach(SpaceModule.configurableModules) { module in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Required Modules")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            Text(["Space Pings", "Photos", "Members", "Settings"].joined(separator: " • "))
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .padding(.vertical, 4)
+
+                        ForEach(SpaceModule.optionalModules) { module in
                             Toggle(
                                 isOn: Binding(
                                     get: { viewModel.isModuleEnabled(module) },
@@ -79,7 +89,6 @@ struct CreateSpaceSheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            .disabled(module == .general)
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
@@ -100,7 +109,7 @@ struct CreateSpaceSheet: View {
                     Text("Modules")
                 } footer: {
                     if viewModel.template == .custom {
-                        Text("General stays on by default. You can enable Files later from Space Settings.")
+                        Text("Required modules always remain enabled. Optional modules can be enabled now or later from Space Settings.")
                     }
                 }
 

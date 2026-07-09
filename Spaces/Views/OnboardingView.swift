@@ -153,7 +153,7 @@ struct OnboardingView: View {
                         .font(.title.bold())
 
                     VStack(alignment: .leading, spacing: 12) {
-                        onboardingModuleRow("💬", "General")
+                        onboardingModuleRow("💬", "Space Pings")
                         onboardingModuleRow("📷", "Photos")
                         onboardingModuleRow("📅", "Events")
                         onboardingModuleRow("👥", "Members")

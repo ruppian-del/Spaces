@@ -55,8 +55,7 @@ final class CreateSpaceViewModel: ObservableObject {
 
     func setModuleEnabled(_ module: SpaceModule, isEnabled: Bool) {
         guard template == .custom else { return }
-        guard module != .settings else { return }
-        guard module != .general || isEnabled else { return }
+        guard SpaceModule.optionalModules.contains(module) else { return }
 
         if isEnabled {
             if !enabledModules.contains(module) {

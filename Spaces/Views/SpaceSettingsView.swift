@@ -55,6 +55,17 @@ struct SpaceSettingsView: View {
         )
     }
 
+    private var eventsEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.eventsEnabled },
+            set: { newValue in
+                Task {
+                    await viewModel.handleEventsToggle(newValue)
+                }
+            }
+        )
+    }
+
     private var pollsEnabledBinding: Binding<Bool> {
         Binding(
             get: { viewModel.pollsEnabled },
@@ -195,12 +206,22 @@ struct SpaceSettingsView: View {
     private var moduleSettingsSection: some View {
         Section {
             if viewModel.canManageModules {
+                Toggle("Events", isOn: eventsEnabledBinding)
+                    .disabled(viewModel.isUpdatingEventsModule)
+
                 Toggle("Files", isOn: filesEnabledBinding)
                     .disabled(viewModel.isUpdatingFilesModule)
 
                 Toggle("Polls", isOn: pollsEnabledBinding)
                     .disabled(viewModel.isUpdatingPollsModule)
             } else {
+                HStack {
+                    Text("Events")
+                    Spacer()
+                    Text(eventsStatusText)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack {
                     Text("Files")
                     Spacer()
@@ -226,6 +247,17 @@ struct SpaceSettingsView: View {
         viewModel.filesEnabled ? "Enabled" : "Disabled"
     }
 
+    private var eventsStatusText: String {
+        viewModel.eventsEnabled ? "Enabled" : "Disabled"
+    }
+
+    private var eventsFooterText: String {
+        if viewModel.eventsEnabled {
+            return "Events can be disabled later. Existing events will be hidden, not deleted."
+        }
+        return "Owners and admins can enable Events later when this Space needs planning and calendars."
+    }
+
     private var filesFooterText: String {
         if viewModel.filesEnabled {
             return "Files can be disabled later. If files already exist, they will be hidden, not deleted."
@@ -245,7 +277,7 @@ struct SpaceSettingsView: View {
     }
 
     private var moduleSettingsFooterText: String {
-        [filesFooterText, pollsFooterText].joined(separator: "\n\n")
+        [eventsFooterText, filesFooterText, pollsFooterText].joined(separator: "\n\n")
     }
 }
 

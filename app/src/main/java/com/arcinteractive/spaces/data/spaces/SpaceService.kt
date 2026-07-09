@@ -776,13 +776,40 @@ class SpaceService(
         val firestore = firestoreOrNull(context) ?: throw IllegalStateException("Firestore is not configured yet.")
         requirePermission(context, space, SpacePermission.ManageModules, "Only members with module permission can manage modules.")
 
-        val mutableModules = space.enabledModules.toMutableList()
+        val mutableModules = latestEnabledModules(context, space).toMutableList()
         if (isEnabled) {
             if (mutableModules.none { it.id == SpaceModules.Files.id }) {
                 mutableModules += SpaceModules.Files
             }
         } else {
             mutableModules.removeAll { it.id == SpaceModules.Files.id }
+        }
+
+        val resolvedModules = sanitizeEnabledModules(mutableModules, space.template)
+        updateData(
+            firestore.collection("spaces").document(space.id),
+            mapOf(
+                "enabledModules" to resolvedModules.map { it.id },
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        )
+    }
+
+    suspend fun setEventsEnabled(
+        context: Context,
+        space: Space,
+        isEnabled: Boolean
+    ) {
+        val firestore = firestoreOrNull(context) ?: throw IllegalStateException("Firestore is not configured yet.")
+        requirePermission(context, space, SpacePermission.ManageModules, "Only members with module permission can manage modules.")
+
+        val mutableModules = latestEnabledModules(context, space).toMutableList()
+        if (isEnabled) {
+            if (mutableModules.none { it.id == SpaceModules.Events.id }) {
+                mutableModules += SpaceModules.Events
+            }
+        } else {
+            mutableModules.removeAll { it.id == SpaceModules.Events.id }
         }
 
         val resolvedModules = sanitizeEnabledModules(mutableModules, space.template)
@@ -803,7 +830,7 @@ class SpaceService(
         val firestore = firestoreOrNull(context) ?: throw IllegalStateException("Firestore is not configured yet.")
         requirePermission(context, space, SpacePermission.ManageModules, "Only members with module permission can manage modules.")
 
-        val mutableModules = space.enabledModules.toMutableList()
+        val mutableModules = latestEnabledModules(context, space).toMutableList()
         if (isEnabled) {
             if (mutableModules.none { it.id == SpaceModules.Polls.id }) {
                 mutableModules += SpaceModules.Polls
@@ -1945,39 +1972,16 @@ class SpaceService(
         template: SpaceTemplate
     ): List<SpaceModule> {
         val requestedIds = modules.filter { it.id != SpaceModules.Settings.id }.map { it.id }.toSet()
-        val baseModules = when (template) {
-            SpaceTemplate.Family, SpaceTemplate.Friends -> mutableListOf(
-                SpaceModules.General,
-                SpaceModules.Photos,
-                SpaceModules.Events,
-                SpaceModules.Members
-            )
-            SpaceTemplate.Business, SpaceTemplate.Community -> mutableListOf(
-                SpaceModules.General,
-                SpaceModules.Events,
-                SpaceModules.Members
-            )
-            SpaceTemplate.Custom -> mutableListOf(SpaceModules.General)
-        }
+        val resolvedModules = SpaceModules.required.toMutableList()
 
-        if (requestedIds.contains(SpaceModules.Photos.id) && baseModules.none { it.id == SpaceModules.Photos.id }) {
-            baseModules += SpaceModules.Photos
-        }
-        if (requestedIds.contains(SpaceModules.Files.id) && baseModules.none { it.id == SpaceModules.Files.id }) {
-            baseModules += SpaceModules.Files
-        }
-        if (requestedIds.contains(SpaceModules.Polls.id) && baseModules.none { it.id == SpaceModules.Polls.id }) {
-            baseModules += SpaceModules.Polls
-        }
-        if (requestedIds.contains(SpaceModules.Events.id) && baseModules.none { it.id == SpaceModules.Events.id }) {
-            baseModules += SpaceModules.Events
-        }
-        if (requestedIds.contains(SpaceModules.Members.id) && baseModules.none { it.id == SpaceModules.Members.id }) {
-            baseModules += SpaceModules.Members
+        SpaceModules.optional.forEach { module ->
+            if (requestedIds.contains(module.id)) {
+                resolvedModules += module
+            }
         }
 
         return SpaceModules.configurable.filter { candidate ->
-            baseModules.any { it.id == candidate.id }
+            resolvedModules.any { it.id == candidate.id }
         }
     }
 
@@ -1994,6 +1998,16 @@ class SpaceService(
         } else {
             sanitizeEnabledModules(template.defaultEnabledModules, template)
         }
+    }
+
+    private suspend fun latestEnabledModules(
+        context: Context,
+        space: Space
+    ): List<SpaceModule> {
+        val firestore = firestoreOrNull(context) ?: throw IllegalStateException("Firestore is not configured yet.")
+        val snapshot = getDocument(firestore.collection("spaces").document(space.id))
+        val data = snapshot.data ?: return sanitizeEnabledModules(space.enabledModules, space.template)
+        return parseEnabledModules(data, space.template)
     }
 
     private fun mapSpace(snapshot: DocumentSnapshot): Space? {

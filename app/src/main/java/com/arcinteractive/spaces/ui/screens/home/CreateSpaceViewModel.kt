@@ -88,10 +88,7 @@ class CreateSpaceViewModel : ViewModel() {
 
     fun setModuleEnabled(module: SpaceModule, isEnabled: Boolean) {
         _uiState.update { current ->
-            if (current.template != SpaceTemplate.Custom || module.id == SpaceModules.Settings.id) {
-                return@update current
-            }
-            if (module.id == SpaceModules.General.id && !isEnabled) {
+            if (current.template != SpaceTemplate.Custom || SpaceModules.optional.none { it.id == module.id }) {
                 return@update current
             }
 

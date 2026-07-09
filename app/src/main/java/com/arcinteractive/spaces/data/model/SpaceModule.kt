@@ -8,7 +8,7 @@ data class SpaceModule(
 )
 
 object SpaceModules {
-    val General = SpaceModule("general", "General", "Daily conversations", "\uD83D\uDCAC")
+    val General = SpaceModule("general", "Space Pings", "Private conversations and quick check-ins", "\uD83D\uDCAC")
     val Photos = SpaceModule("photos", "Photos", "Shared photos and memes", "\uD83D\uDCF7")
     val Files = SpaceModule("files", "Files", "Shared documents and uploads", "\uD83D\uDCC1")
     val Polls = SpaceModule("polls", "Polls", "Questions and voting", "\uD83D\uDCCA")
@@ -16,7 +16,9 @@ object SpaceModules {
     val Members = SpaceModule("members", "Members", "People in this Space", "\uD83D\uDC65")
     val Settings = SpaceModule("settings", "Settings", "Space preferences", "⚙️")
 
-    val configurable = listOf(General, Photos, Files, Polls, Events, Members)
+    val required = listOf(General, Photos, Members)
+    val optional = listOf(Events, Files, Polls)
+    val configurable = required + optional
 
     fun fromId(id: String): SpaceModule? = when (id) {
         General.id -> General

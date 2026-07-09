@@ -192,7 +192,16 @@ fun CreateSpaceSheet(
                     Text("Modules", style = MaterialTheme.typography.titleMedium)
                     if (uiState.template == SpaceTemplate.Custom) {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            SpaceModules.configurable.forEach { module ->
+                            Text(
+                                "Required modules",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "Space Pings • Photos • Members • Settings",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            SpaceModules.optional.forEach { module ->
                                 Surface(
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(18.dp),
@@ -219,15 +228,14 @@ fun CreateSpaceSheet(
                                         }
                                         androidx.compose.material3.Switch(
                                             checked = viewModel.isModuleEnabled(module),
-                                            onCheckedChange = { viewModel.setModuleEnabled(module, it) },
-                                            enabled = module.id != SpaceModules.General.id
+                                            onCheckedChange = { viewModel.setModuleEnabled(module, it) }
                                         )
                                     }
                                 }
                             }
                         }
                         Text(
-                            "General stays on by default. You can enable Files later from Space Settings.",
+                            "Required modules always remain enabled. Optional modules can be enabled now or later from Space Settings.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
