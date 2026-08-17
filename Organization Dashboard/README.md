@@ -1,6 +1,8 @@
 # theSpaces. Organization Dashboard
 
-A separate, read-only PWA control surface for organization administrators. Native iOS and Android remain the member content experience; this dashboard never reads or renders Space content such as messages, Rooms, Announcements, Media, Files, Polls, Events, Lists, or Notes.
+A separate PWA setup and control surface for organization administrators. Native iOS and Android remain the member content experience; this dashboard never reads or renders Space content such as messages, Rooms, Announcements, Media, Files, Polls, Events, Lists, or Notes.
+
+Milestone 2 adds Foundation organization onboarding, optional identity metadata, primary-administrator creation, administrator invitations, and supported role management. Capacity and paid module entitlements remain read-only.
 
 ## Local setup
 
@@ -30,10 +32,18 @@ The web reader mirrors the v1.6 mobile contract:
 - Entitlements: `peopleCapacity`, `activeSpaceCapacity`, `enabledModuleIds`, and `mediaStorageCapacityBytes` under `entitlements`.
 - Usage: `peopleCount`, `activeSpaceCount`, and `mediaStorageBytes` under `usage`.
 - Archived Spaces are identified by `isArchived == true` and do not count as active.
+- Optional identity metadata is additive on the organization document: `description`, `contactEmail`, `website`, and `logoDataUrl`. The logo is imported locally as a PNG, JPEG, or WebP image (250 KB maximum), not supplied as an external URL. Native clients safely ignore these fields.
+- Invitations use `organizationInvites/{code}` with the native fields `organizationId`, `organizationName`, `role`, `createdBy`, `createdAt`, and `active`.
 
-The dashboard only performs reads. It does not include rules, deploy configuration, billing, subscription planning, mutations, or content decryption.
+Foundation creation writes the organization and `organizations/{organizationId}/members/{uid}` primary-administrator document in one atomic batch. It applies only the approved Foundation values: 250 unique members, 10 active Spaces, 10 GB pooled storage, and module IDs `general`, `events`, `polls`, `activity`, `members`, and `settings`.
+
+The dashboard does not include billing, subscription planning, paid entitlement activation, or content decryption. Firebase rules remain owned and managed separately and are never deployed by this project.
+
+## Current backend authorization limits
+
+The checked-in v1.6 Firestore rules authorize Foundation bootstrap, invitation creation, and primary-admin role updates. They currently reject post-setup identity updates, administrator-member deletion, and administrator-driven invitation revocation. The PWA reports permission-denied errors for rejected operations and does not work around the rules. No Firebase rules were changed for Milestone 2.
 
 ## Verification
 
-- `npm test` — mapping and dashboard-state tests.
+- `npm test` — mapping, dashboard-state, validation, Foundation-default, idempotency, permission, and onboarding-state tests.
 - `npm run build` — type-check and production PWA bundle.

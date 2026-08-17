@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Archive, Building2, Database, ExternalLink, LayoutGrid, LogOut, Puzzle, ShieldCheck, Users } from 'lucide-react'
+import { Archive, Building2, Database, ExternalLink, LayoutGrid, LogOut, Puzzle, Settings, ShieldCheck, Users } from 'lucide-react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { Brand } from '../components/Brand'
 import { StateView } from '../components/StateView'
 import { useAuth } from '../auth/AuthContext'
 import { listOrganizations, loadDashboard, resolveAdministratorProfiles } from '../data/organizationRepository'
+import { mergeAdministratorAuthDisplayName } from '../data/mappers'
 import type { DashboardData, LoadState, Organization } from '../types'
 
 const MODULES: Record<string, { title: string; group: string }> = {
@@ -47,7 +48,7 @@ export function DashboardContent({ data }: { data: DashboardData }) {
   const modules = entitlements.enabledModuleIds.map((id) => ({ id, ...(MODULES[id] ?? { title: id, group: 'Additional' }) }))
   const activeSpaces = spaces.filter((space) => !space.isArchived)
   const uniqueMemberCount = new Set(spaces.flatMap((space) => space.memberIds)).size
-  return <><div className="dashboard-heading"><div><span className="eyebrow">Organization overview</span><h1>{org.name}</h1><div className="status-line"><span className={`status-dot ${org.status}`} /> {org.status === 'active' ? 'Active' : 'Suspended'}</div></div></div>
+  return <><div className="dashboard-heading"><div><span className="eyebrow">Organization overview</span><h1>{org.name}</h1>{org.description && <p>{org.description}</p>}<div className="status-line"><span className={`status-dot ${org.status}`} /> {org.status === 'active' ? 'Active' : 'Suspended'}</div></div><Link className="secondary-button" to={`/organizations/${org.id}/settings`}><Settings size={17} /> Settings</Link></div>
     <section aria-labelledby="capacity-heading"><div className="section-heading"><div><h2 id="capacity-heading">Capacity at a glance</h2><p>Unique members count once across every organization-owned Space.</p></div><span>Updated just now</span></div><div className="usage-grid"><UsageCard label="Unique members" used={uniqueMemberCount} capacity={entitlements.peopleCapacity} icon={<Users />} /><UsageCard label="Active Spaces" used={activeSpaces.length} capacity={entitlements.activeSpaceCapacity} icon={<LayoutGrid />} /><UsageCard label="Pooled storage" used={org.usage.mediaStorageBytes} capacity={entitlements.mediaStorageCapacityBytes} icon={<Database />} /></div></section>
     <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-icon violet"><Puzzle /></span><div><h2>Enabled modules</h2><p>{modules.length} entitlements available</p></div></div></div><div className="module-list">{modules.map((module) => <div className="module-row" key={module.id}><span className="module-check">✓</span><span><strong>{module.title}</strong><small>{module.group}</small></span><span className="enabled-label">Enabled</span></div>)}</div></section>
       <div className="right-stack"><section className="panel"><div className="panel-heading"><div><span className="panel-icon blue"><ShieldCheck /></span><div><h2>Administrators</h2><p>{administrators.length} people can manage this organization</p></div></div></div>{administrators.length === 0 ? <p className="inline-empty">No administrators were returned.</p> : <div className="admin-list">{administrators.map((admin) => <div className="admin-row" key={admin.id}><span className="person-avatar">{admin.displayName.split(' ').map((part) => part[0]).slice(0, 2).join('')}</span><span><strong>{admin.displayName}</strong><small>{admin.email ?? 'No email available'}</small></span><span className="role-pill">{admin.role === 'primary_admin' ? 'Primary admin' : 'Admin'}</span></div>)}</div>}</section>
@@ -65,11 +66,12 @@ export function DashboardPage() {
         ? routedOrganization
         : (await listOrganizations(user!.uid)).find((item) => item.id === organizationId)
       if (!organization) { setState({ kind: 'permission-denied' }); return }
-      const data = await loadDashboard(organization)
+      const loadedData = await loadDashboard(organization)
+      const data = { ...loadedData, administrators: loadedData.administrators.map((administrator) => mergeAdministratorAuthDisplayName(administrator, user!)) }
       const currentMember = data.administrators.some((admin) => admin.userId === user!.uid)
       if (!currentMember) { setState({ kind: 'permission-denied' }); return }
       setState({ kind: 'ready', data })
-      const administrators = await resolveAdministratorProfiles(data.administrators)
+      const administrators = (await resolveAdministratorProfiles(data.administrators)).map((administrator) => mergeAdministratorAuthDisplayName(administrator, user!))
       setState({ kind: 'ready', data: { ...data, administrators } })
     } catch (error: unknown) {
       const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : ''

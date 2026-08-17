@@ -2,7 +2,7 @@ import type { DashboardData } from '../types'
 
 export const dashboardFixture: DashboardData = {
   organization: {
-    id: 'org-test', name: 'Northstar Community', status: 'active',
+    id: 'org-test', name: 'Northstar Community', description: null, contactEmail: null, website: null, logoDataUrl: null, status: 'active',
     entitlements: { peopleCapacity: 250, activeSpaceCapacity: 10, enabledModuleIds: ['general', 'events'], mediaStorageCapacityBytes: 10 * 1024 ** 3 },
     usage: { peopleCount: 184, activeSpaceCount: 1, mediaStorageBytes: 4 * 1024 ** 3 },
   },

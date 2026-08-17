@@ -4,6 +4,10 @@ export type OrganizationRole = 'primary_admin' | 'admin' | 'member'
 export interface Organization {
   id: string
   name: string
+  description: string | null
+  contactEmail: string | null
+  website: string | null
+  logoDataUrl: string | null
   status: OrganizationStatus
   entitlements: {
     peopleCapacity: number | null
@@ -14,6 +18,14 @@ export interface Organization {
   usage: { peopleCount: number; activeSpaceCount: number; mediaStorageBytes: number }
 }
 
+export interface OrganizationIdentityInput {
+  name: string
+  description: string
+  contactEmail: string
+  website: string
+  logoDataUrl: string
+}
+
 export interface OrganizationAdministrator {
   id: string
   userId: string
@@ -21,6 +33,17 @@ export interface OrganizationAdministrator {
   email: string | null
   role: OrganizationRole
   status: 'active' | 'suspended'
+}
+
+export type OrganizationMember = OrganizationAdministrator
+
+export interface OrganizationInvitation {
+  id: string
+  organizationId: string
+  organizationName: string
+  role: 'admin' | 'member'
+  active: boolean
+  createdBy: string
 }
 
 export interface OrganizationSpace {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mapAdministrator, mapOrganization, mapSpace, mergeAdministratorProfile } from '../data/mappers'
+import { mapAdministrator, mapOrganization, mapSpace, mergeAdministratorAuthDisplayName, mergeAdministratorProfile } from '../data/mappers'
 
 describe('mobile-compatible organization mapping', () => {
   it('maps nested entitlements and usage without changing field names', () => {
@@ -8,7 +8,7 @@ describe('mobile-compatible organization mapping', () => {
       entitlements: { peopleCapacity: 350, activeSpaceCapacity: 14, enabledModuleIds: ['general', 'rooms'], mediaStorageCapacityBytes: 10737418240 },
       usage: { peopleCount: 122, activeSpaceCount: 8, mediaStorageBytes: 1024 },
     })
-    expect(result).toMatchObject({ id: 'org-1', status: 'suspended', entitlements: { enabledModuleIds: ['general', 'rooms'] }, usage: { peopleCount: 122 } })
+    expect(result).toMatchObject({ id: 'org-1', status: 'suspended', description: null, contactEmail: null, website: null, logoDataUrl: null, entitlements: { enabledModuleIds: ['general', 'rooms'] }, usage: { peopleCount: 122 } })
   })
 
   it('uses safe read defaults for missing optional data', () => {
@@ -86,5 +86,10 @@ describe('mobile-compatible organization mapping', () => {
       displayName: 'Ian Rupp',
       email: 'ian@example.com',
     })
+  })
+
+  it('uses the signed-in primary administrator auth name when the member snapshot lacks one', () => {
+    const administrator = mapAdministrator('u1', { userId: 'u1', displayName: '', role: 'primary_admin' })!
+    expect(mergeAdministratorAuthDisplayName(administrator, { uid: 'u1', displayName: 'Ian Rupp', email: 'ian@example.com' })).toMatchObject({ displayName: 'Ian Rupp', email: 'ian@example.com' })
   })
 })

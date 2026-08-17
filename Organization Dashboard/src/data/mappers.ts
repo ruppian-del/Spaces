@@ -54,6 +54,10 @@ export function mapOrganization(id: string, data: DocumentData): Organization | 
   return {
     id,
     name: data.name,
+    description: typeof data.description === 'string' && data.description.trim() ? data.description.trim() : null,
+    contactEmail: typeof data.contactEmail === 'string' && data.contactEmail.trim() ? data.contactEmail.trim() : null,
+    website: typeof data.website === 'string' && data.website.trim() ? data.website.trim() : null,
+    logoDataUrl: typeof data.logoDataUrl === 'string' && data.logoDataUrl.trim() ? data.logoDataUrl.trim() : null,
     status: data.status === 'suspended' ? 'suspended' : 'active',
     entitlements: {
       peopleCapacity: isCompletelyUnconfigured ? FOUNDATION_ENTITLEMENTS.peopleCapacity : storedPeopleCapacity,
@@ -91,6 +95,18 @@ export function mergeAdministratorProfile(
     ...administrator,
     displayName: usableName(profile.displayName) ?? administrator.displayName,
     email: typeof profile.email === 'string' && profile.email.trim() ? profile.email : administrator.email,
+  }
+}
+
+export function mergeAdministratorAuthDisplayName(
+  administrator: OrganizationAdministrator,
+  currentUser: { uid: string; displayName: string | null; email: string | null },
+): OrganizationAdministrator {
+  if (administrator.userId !== currentUser.uid) return administrator
+  return {
+    ...administrator,
+    displayName: usableName(currentUser.displayName) ?? administrator.displayName,
+    email: currentUser.email ?? administrator.email,
   }
 }
 
