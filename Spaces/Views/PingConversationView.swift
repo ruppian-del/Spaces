@@ -1,8 +1,32 @@
+import AVFoundation
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
+import UIKit
+
+fileprivate struct PingMediaPickerConfiguration: Identifiable {
+    enum FilterKind {
+        case imagesAndVideos
+    }
+
+    let id: String
+    let filterKind: FilterKind
+    let mediaCategory: String
+
+    static let photosAndVideos = PingMediaPickerConfiguration(
+        id: "photos-and-videos",
+        filterKind: .imagesAndVideos,
+        mediaCategory: "photo"
+    )
+}
 
 struct PingConversationView: View {
     @StateObject private var viewModel: PingConversationViewModel
     @FocusState private var isComposerFocused: Bool
+    @State private var selectedMedia: SpaceMedia?
+    @State private var activeMediaPickerConfiguration: PingMediaPickerConfiguration?
+    @State private var isGiphyPickerPresented = false
+    @State private var isAttachmentMenuPresented = false
     @State private var pendingDeleteMessage: SpaceMessage?
     @State private var highlightedMessageID: String?
 
@@ -20,7 +44,9 @@ struct PingConversationView: View {
                         ForEach(Array(viewModel.messages.filter { !$0.deleted }.enumerated()), id: \.element.id) { index, message in
                             MessageBubbleView(
                                 message: message,
-                                onTapMedia: { _ in },
+                                onTapMedia: { media in
+                                    selectedMedia = media
+                                },
                                 onDelete: deleteAction(for: message),
                                 onReply: { viewModel.beginReply(to: message) },
                                 onEdit: viewModel.canEdit(message) ? { viewModel.beginEditing(message) } : nil,
@@ -44,6 +70,11 @@ struct PingConversationView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 12)
             }
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    isComposerFocused = false
+                }
+            )
             .background(Color(.systemGroupedBackground))
             .navigationTitle(otherTitle)
             .navigationBarTitleDisplayMode(.inline)
@@ -57,6 +88,46 @@ struct PingConversationView: View {
             }
             .onChange(of: viewModel.messages) { _ in
                 scrollToBottom(proxy: proxy, animated: true)
+            }
+            .fullScreenCover(item: $selectedMedia) { media in
+                MediaViewerPlaceholderView(space: placeholderSpace, media: media)
+            }
+            .confirmationDialog(
+                "Attachments",
+                isPresented: $isAttachmentMenuPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Photos & Videos") {
+                    activeMediaPickerConfiguration = .photosAndVideos
+                }
+                Button("GIFs") {
+                    isGiphyPickerPresented = true
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Choose what to send in this Ping.")
+            }
+            .sheet(item: $activeMediaPickerConfiguration) { configuration in
+                PingMediaPicker(configuration: configuration) { selection in
+                    viewModel.selectComposerMedia(
+                        data: selection?.data,
+                        previewImageData: selection?.previewImageData,
+                        mimeType: selection?.mimeType,
+                        mediaCategory: selection?.mediaCategory ?? configuration.mediaCategory,
+                        isVideo: selection?.isVideo == true
+                    )
+                }
+            }
+            .sheet(isPresented: $isGiphyPickerPresented) {
+                GiphyPickerView { selection in
+                    viewModel.selectComposerMedia(
+                        data: selection?.data,
+                        previewImageData: selection?.previewImageData,
+                        mimeType: selection?.mimeType,
+                        mediaCategory: selection?.mediaCategory ?? "gif",
+                        isVideo: selection?.isVideo == true
+                    )
+                }
             }
             .alert("Delete this message?", isPresented: Binding(
                 get: { pendingDeleteMessage != nil },
@@ -92,6 +163,22 @@ struct PingConversationView: View {
 
     private var otherEmoji: String {
         viewModel.ping.emoji(for: viewModel.resolvedCurrentUserID)
+    }
+
+    private var placeholderSpace: Space {
+        Space(
+            id: "ping-\(viewModel.ping.id)",
+            name: otherTitle,
+            emoji: otherEmoji,
+            tintHex: "#7C72FF",
+            description: "Private conversation",
+            template: .custom,
+            ownerId: viewModel.resolvedCurrentUserID ?? "",
+            memberIds: viewModel.ping.participantIds,
+            unreadCount: 0,
+            enabledModules: [.general],
+            moduleOrder: [.general, .settings]
+        )
     }
 
     private var header: some View {
@@ -138,9 +225,48 @@ struct PingConversationView: View {
                 )
             }
 
+            if let image = viewModel.selectedComposerUIImage {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 72, height: 72)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        if viewModel.selectedComposerIsVideo {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.white)
+                                .shadow(radius: 3)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(viewModel.selectedComposerIsVideo ? "Video ready to send" : "Attachment ready")
+                            .font(.subheadline.weight(.semibold))
+                        Text("Add a caption if you want.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        viewModel.removeComposerMedia()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+            }
+
             HStack(alignment: .bottom, spacing: 10) {
                 Button {
-                    viewModel.errorMessage = "Photos and videos are not enabled for Ping yet."
+                    isAttachmentMenuPresented = true
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 18, weight: .semibold))
@@ -151,7 +277,7 @@ struct PingConversationView: View {
                 .foregroundStyle(.secondary)
 
                 TextField(
-                    viewModel.isEditing ? "Edit message" : "Message",
+                    viewModel.isEditing ? "Edit message" : (viewModel.selectedComposerUIImage == nil ? "Message" : "Add a caption..."),
                     text: $viewModel.composerText
                 )
                 .focused($isComposerFocused)
@@ -267,6 +393,141 @@ struct PingConversationView: View {
             }
         } else {
             proxy.scrollTo(lastID, anchor: .bottom)
+        }
+    }
+}
+
+private struct PickedPingComposerMedia {
+    let data: Data
+    let previewImageData: Data
+    let mimeType: String
+    let mediaCategory: String
+    let isVideo: Bool
+}
+
+private struct PingMediaPicker: UIViewControllerRepresentable {
+    let configuration: PingMediaPickerConfiguration
+    let onMediaPicked: (PickedPingComposerMedia?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(configuration: configuration, onMediaPicked: onMediaPicked, dismiss: dismiss.callAsFunction)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        switch self.configuration.filterKind {
+        case .imagesAndVideos:
+            configuration.filter = .any(of: [.images, .videos])
+        }
+        configuration.selectionLimit = 1
+
+        let controller = PHPickerViewController(configuration: configuration)
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        private let configuration: PingMediaPickerConfiguration
+        private let onMediaPicked: (PickedPingComposerMedia?) -> Void
+        private let dismiss: () -> Void
+
+        init(
+            configuration: PingMediaPickerConfiguration,
+            onMediaPicked: @escaping (PickedPingComposerMedia?) -> Void,
+            dismiss: @escaping () -> Void
+        ) {
+            self.configuration = configuration
+            self.onMediaPicked = onMediaPicked
+            self.dismiss = dismiss
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            guard let result = results.first else {
+                dismiss()
+                onMediaPicked(nil)
+                return
+            }
+
+            if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                result.itemProvider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    DispatchQueue.main.async {
+                        self.dismiss()
+                        guard let data else {
+                            self.onMediaPicked(nil)
+                            return
+                        }
+                        let mimeType = Self.mimeType(for: result.itemProvider, fallback: .image)
+                        guard !Self.isAnimatedGIF(mimeType: mimeType) else {
+                            self.onMediaPicked(nil)
+                            return
+                        }
+                        self.onMediaPicked(
+                            PickedPingComposerMedia(
+                                data: data,
+                                previewImageData: data,
+                                mimeType: mimeType,
+                                mediaCategory: self.configuration.mediaCategory,
+                                isVideo: false
+                            )
+                        )
+                    }
+                }
+            } else if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
+                    guard let url, let data = try? Data(contentsOf: url) else {
+                        DispatchQueue.main.async {
+                            self.dismiss()
+                            self.onMediaPicked(nil)
+                        }
+                        return
+                    }
+
+                    let previewImageData = (try? Self.videoPreviewImageData(for: url)) ?? data
+                    DispatchQueue.main.async {
+                        self.dismiss()
+                        self.onMediaPicked(
+                            PickedPingComposerMedia(
+                                data: data,
+                                previewImageData: previewImageData,
+                                mimeType: Self.mimeType(for: result.itemProvider, fallback: .movie),
+                                mediaCategory: "video",
+                                isVideo: true
+                            )
+                        )
+                    }
+                }
+            } else {
+                dismiss()
+                onMediaPicked(nil)
+            }
+        }
+
+        private static func mimeType(for provider: NSItemProvider, fallback: UTType) -> String {
+            for identifier in provider.registeredTypeIdentifiers {
+                if let type = UTType(identifier), let mimeType = type.preferredMIMEType {
+                    return mimeType
+                }
+            }
+            return fallback.preferredMIMEType ?? "application/octet-stream"
+        }
+
+        private static func isAnimatedGIF(mimeType: String) -> Bool {
+            mimeType.caseInsensitiveCompare("image/gif") == .orderedSame
+        }
+
+        private static func videoPreviewImageData(for url: URL) throws -> Data {
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            let cgImage = try generator.copyCGImage(at: .zero, actualTime: nil)
+            let image = UIImage(cgImage: cgImage)
+            guard let data = image.jpegData(compressionQuality: 0.8) else {
+                throw NSError(domain: "PingMediaPicker", code: -1)
+            }
+            return data
         }
     }
 }

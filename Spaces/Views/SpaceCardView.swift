@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SpaceCardView: View {
     let space: Space
+    let draftPreview: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -32,11 +33,19 @@ struct SpaceCardView: View {
                     .foregroundStyle(.primary)
                     .multilineTextAlignment(.leading)
 
+                if let draftPreview, !draftPreview.isEmpty {
+                    Text("Draft: \(draftPreview)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(1)
+                }
+
                 Text(space.subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
-                    .lineLimit(2)
+                    .lineLimit(draftPreview == nil ? 2 : 1)
             }
         }
         .padding(16)

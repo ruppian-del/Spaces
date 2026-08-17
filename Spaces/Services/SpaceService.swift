@@ -63,7 +63,6 @@ final class SpaceService {
                 }
 
                 let spaces = snapshot.documents.compactMap(self.mapSpace(document:))
-                    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
                 onUpdate(.success(spaces))
             }
     }
@@ -145,9 +144,18 @@ final class SpaceService {
                     return
                 }
 
-                let files = (snapshot?.documents.compactMap(self.mapFile(document:)) ?? [])
-                    .filter { !$0.deleted }
-                onUpdate(.success(files))
+                Task { @MainActor in
+                    do {
+                        let spaceKey = try await self.ensureGeneralEncryptionKey(in: space)
+                        let documents = snapshot?.documents ?? []
+                        let files = try documents.compactMap { document in
+                            try self.mapFile(document: document, spaceKey: spaceKey)
+                        }.filter { !$0.deleted }
+                        onUpdate(.success(files))
+                    } catch {
+                        onUpdate(.failure(error))
+                    }
+                }
             }
     }
 
@@ -225,6 +233,42 @@ final class SpaceService {
                     .filter { !$0.deleted }
                 onUpdate(.success(events))
             }
+    }
+
+    func fetchFiles(in space: Space) async throws -> [SpaceFileItem] {
+        guard let firestore else { return [] }
+        let spaceKey = try await ensureGeneralEncryptionKey(in: space)
+        let snapshot = try await getDocuments(
+            firestore.collection("spaces")
+                .document(space.id)
+                .collection("files")
+                .order(by: "createdAt", descending: true)
+        )
+        return try snapshot.documents.compactMap { document in
+            try mapFile(document: document, spaceKey: spaceKey)
+        }.filter { !$0.deleted }
+    }
+
+    func fetchPolls(in space: Space) async throws -> [SpacePoll] {
+        guard let firestore else { return [] }
+        let snapshot = try await getDocuments(
+            firestore.collection("spaces")
+                .document(space.id)
+                .collection("polls")
+                .order(by: "createdAt", descending: true)
+        )
+        return snapshot.documents.compactMap(mapPoll(document:)).filter { !$0.deleted }
+    }
+
+    func fetchEvents(in space: Space) async throws -> [SpaceEvent] {
+        guard let firestore else { return [] }
+        let snapshot = try await getDocuments(
+            firestore.collection("spaces")
+                .document(space.id)
+                .collection("events")
+                .order(by: "startDate", descending: false)
+        )
+        return snapshot.documents.compactMap(mapEvent(document:)).filter { !$0.deleted }
     }
 
     func listenToActivity(
@@ -325,6 +369,29 @@ final class SpaceService {
         ], for: firestore.collection("notifications").document(notification.id))
     }
 
+    func markAllNotificationsRead() async throws {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+        guard let session = authService.currentSession() else {
+            throw SpaceServiceError.userNotSignedIn
+        }
+
+        let snapshot = try await getDocuments(
+            firestore.collection("notifications")
+                .whereField("recipientId", isEqualTo: session.uid)
+                .whereField("read", isEqualTo: false)
+                .order(by: "createdAt", descending: true)
+        )
+
+        for document in snapshot.documents {
+            try await updateData([
+                "read": true,
+                "readAt": FieldValue.serverTimestamp()
+            ], for: document.reference)
+        }
+    }
+
     func clearActivity(_ activity: ActivityItem) async throws {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -400,6 +467,13 @@ final class SpaceService {
                         try self.runMessageEncryptionSelfTestIfNeeded(spaceID: space.id, spaceKey: spaceKey)
                         var messages: [SpaceMessage] = []
                         for document in snapshot.documents {
+                            let data = document.data()
+                            let type = data["type"] as? String ?? ""
+                            let mediaCategory = data["mediaCategory"] as? String ?? ""
+                            let mediaType = data["mediaType"] as? String ?? ""
+                            if type == "gif" || mediaCategory == "gif" || mediaType == "gif" {
+                                print("[GIF Receive] message document received id=\(document.documentID) type=\(type) mediaCategory=\(mediaCategory) mediaType=\(mediaType)")
+                            }
                             if let message = try self.mapMessage(document: document, currentUserID: currentUserID, spaceKey: spaceKey) {
                                 messages.append(message)
                             }
@@ -552,6 +626,7 @@ final class SpaceService {
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedDescription = trimmedDescription.isEmpty ? template.defaultSubtitle : trimmedDescription
         let resolvedEnabledModules = sanitizeEnabledModules(enabledModules, for: template)
+        let resolvedModuleOrder = sanitizeModuleOrder(template.defaultModuleOrder, enabledModules: resolvedEnabledModules)
         let spaceID = firestore.collection("spaces").document().documentID
         let spaceReference = firestore.collection("spaces").document(spaceID)
         let memberReference = spaceReference.collection("members").document(session.uid)
@@ -567,6 +642,7 @@ final class SpaceService {
             "description": resolvedDescription,
             "template": template.rawValue,
             "enabledModules": resolvedEnabledModules.map(\.id),
+            "moduleOrder": resolvedModuleOrder.map(\.id),
             "ownerId": session.uid,
             "memberIds": [session.uid],
             "createdAt": FieldValue.serverTimestamp(),
@@ -597,7 +673,8 @@ final class SpaceService {
             ownerId: session.uid,
             memberIds: [session.uid],
             unreadCount: nil,
-            enabledModules: resolvedEnabledModules
+            enabledModules: resolvedEnabledModules,
+            moduleOrder: resolvedModuleOrder
         )
         await recordActivity(
             type: .spaceCreated,
@@ -759,7 +836,9 @@ final class SpaceService {
                     )
                     transaction.updateData(["usedCount": usedCount + 1], forDocument: inviteReference)
 
-                    return self.mappedSpace(data: spaceData, documentID: spaceSnapshot.documentID)
+                    var joinedData = spaceData
+                    joinedData["memberIds"] = updatedMemberIDs
+                    return self.mappedSpace(data: joinedData, documentID: spaceSnapshot.documentID)
                 } catch let error as NSError {
                     errorPointer?.pointee = error
                     return nil
@@ -918,6 +997,59 @@ final class SpaceService {
         ], for: firestore.collection("spaces").document(space.id))
     }
 
+    func fetchSpaceOrderForCurrentUser() async throws -> [String] {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+        guard let session = authService.currentSession() else {
+            throw SpaceServiceError.userNotSignedIn
+        }
+
+        let snapshot = try await getDocument(firestore.collection("users").document(session.uid))
+        let data = snapshot.data() ?? [:]
+        return normalizedSpaceOrder(data["spaceOrder"] as? [String] ?? [])
+    }
+
+    func saveSpaceOrderForCurrentUser(_ spaceIDs: [String]) async throws {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+        guard let session = authService.currentSession() else {
+            throw SpaceServiceError.userNotSignedIn
+        }
+
+        try await setData([
+            "spaceOrder": normalizedSpaceOrder(spaceIDs),
+            "updatedAt": FieldValue.serverTimestamp()
+        ], for: firestore.collection("users").document(session.uid), merge: true)
+    }
+
+    func fetchModuleOrder(in space: Space) async throws -> [SpaceModule] {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+
+        let snapshot = try await getDocument(firestore.collection("spaces").document(space.id))
+        let data = snapshot.data() ?? [:]
+        let enabledModules = parseEnabledModules(from: data, template: space.template)
+        return parseModuleOrder(from: data, template: space.template, enabledModules: enabledModules)
+    }
+
+    func updateModuleOrder(in space: Space, modules: [SpaceModule]) async throws {
+        guard let firestore else {
+            throw SpaceServiceError.firestoreNotConfigured
+        }
+
+        try await requirePermission(.manageModules, in: space, error: .invitePermissionDenied)
+        let latestEnabled = try await latestEnabledModules(in: space)
+        let resolvedOrder = sanitizeModuleOrder(modules, enabledModules: latestEnabled)
+
+        try await updateData([
+            "moduleOrder": resolvedOrder.map(\.id),
+            "updatedAt": FieldValue.serverTimestamp()
+        ], for: firestore.collection("spaces").document(space.id))
+    }
+
     func removeMember(from space: Space, memberID: String) async throws {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -966,7 +1098,10 @@ final class SpaceService {
     func sendTextMessage(
         in space: Space,
         text: String,
-        replyContext: MessageReplyContext? = nil
+        linkPreview: LinkPreviewData? = nil,
+        spaceLinks: [SpaceLinkAttachment] = [],
+        replyContext: MessageReplyContext? = nil,
+        messageID: String? = nil
     ) async throws -> SpaceMessage {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -976,7 +1111,7 @@ final class SpaceService {
         }
 
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else {
+        guard !trimmedText.isEmpty || !spaceLinks.isEmpty else {
             throw SpaceServiceError.invalidMessageText
         }
 
@@ -987,11 +1122,12 @@ final class SpaceService {
         let profile = try await userProfileService.fetchUserProfile(uid: session.uid)
         let senderName = profile?.displayName ?? session.displayName
         let senderEmoji = profile?.emojiAvatar.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "🧑‍💻"
-        let encryptedPayload = try encryptionService.encryptText(trimmedText, using: spaceKey)
+        let plaintext = try encodeTextMessageContent(text: trimmedText, linkPreview: linkPreview, spaceLinks: spaceLinks)
+        let encryptedPayload = try encryptionService.encryptText(plaintext, using: spaceKey)
         let messageReference = firestore.collection("spaces")
             .document(space.id)
             .collection("messages")
-            .document()
+            .document(messageID ?? UUID().uuidString)
 
         var messageData: [String: Any] = [
             "id": messageReference.documentID,
@@ -1047,14 +1183,18 @@ final class SpaceService {
             status: "sent",
             deliveryStatus: "Sent",
             isEdited: false,
-            replyContext: replyContext
+            replyContext: replyContext,
+            linkPreview: linkPreview,
+            spaceLinks: spaceLinks
         )
     }
 
     func editTextMessage(
         in space: Space,
         messageID: String,
-        newText: String
+        newText: String,
+        linkPreview: LinkPreviewData? = nil,
+        spaceLinks: [SpaceLinkAttachment] = []
     ) async throws -> SpaceMessage {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -1064,7 +1204,7 @@ final class SpaceService {
         }
 
         let trimmedText = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else {
+        guard !trimmedText.isEmpty || !spaceLinks.isEmpty else {
             throw SpaceServiceError.invalidMessageText
         }
 
@@ -1086,7 +1226,8 @@ final class SpaceService {
 
         let spaceKey = try await ensureGeneralEncryptionKey(in: space)
         try runMessageEncryptionSelfTestIfNeeded(spaceID: space.id, spaceKey: spaceKey)
-        let encryptedPayload = try encryptionService.encryptText(trimmedText, using: spaceKey)
+        let plaintext = try encodeTextMessageContent(text: trimmedText, linkPreview: linkPreview, spaceLinks: spaceLinks)
+        let encryptedPayload = try encryptionService.encryptText(plaintext, using: spaceKey)
 
         try await updateData([
             "ciphertextBase64": encryptedPayload.ciphertext,
@@ -1116,8 +1257,17 @@ final class SpaceService {
             isEdited: true,
             editedAt: Date(),
             replyContext: mappedReplyContext(from: data),
+            linkPreview: linkPreview,
+            spaceLinks: spaceLinks,
             reactions: []
         )
+    }
+
+    struct ImageAttachmentUpload {
+        let data: Data
+        let previewImageData: Data
+        let mimeType: String
+        let mediaCategory: String
     }
 
     func sendImageMessage(
@@ -1125,7 +1275,33 @@ final class SpaceService {
         imageData: Data,
         caption: String?,
         mediaCategory: String = "photo",
-        replyContext: MessageReplyContext? = nil
+        previewImageData: Data? = nil,
+        mimeType: String = "image/jpeg",
+        replyContext: MessageReplyContext? = nil,
+        messageID: String? = nil
+    ) async throws -> SpaceMessage {
+        try await sendImageMessage(
+            in: space,
+            imageAttachments: [
+                ImageAttachmentUpload(
+                    data: imageData,
+                    previewImageData: previewImageData ?? imageData,
+                    mimeType: mimeType,
+                    mediaCategory: mediaCategory
+                )
+            ],
+            caption: caption,
+            replyContext: replyContext,
+            messageID: messageID
+        )
+    }
+
+    func sendImageMessage(
+        in space: Space,
+        imageAttachments: [ImageAttachmentUpload],
+        caption: String?,
+        replyContext: MessageReplyContext? = nil,
+        messageID: String? = nil
     ) async throws -> SpaceMessage {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -1133,11 +1309,28 @@ final class SpaceService {
         guard let session = authService.currentSession() else {
             throw SpaceServiceError.userNotSignedIn
         }
+        guard !imageAttachments.isEmpty else {
+            throw SpaceServiceError.invalidMediaData
+        }
         try await requirePermission(.uploadPhotosVideos, in: space, error: .messageDeletePermissionDenied)
         let profile = try await userProfileService.fetchUserProfile(uid: session.uid)
         let senderName = profile?.displayName ?? session.displayName
         let senderEmoji = profile?.emojiAvatar.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "🧑‍💻"
-        let resolvedMediaType = MediaType(rawValue: mediaCategory) ?? .photo
+        let firstAttachment = imageAttachments[0]
+        let resolvedMediaType = MediaType(rawValue: firstAttachment.mediaCategory) ?? .photo
+        let resolvedMessageType: MessageType = {
+            if imageAttachments.count > 1 {
+                return .image
+            }
+            switch resolvedMediaType {
+            case .gif:
+                return .gif
+            case .meme:
+                return .meme
+            default:
+                return .image
+            }
+        }()
         let spaceKey = try await ensureGeneralEncryptionKey(in: space)
         try runMessageEncryptionSelfTestIfNeeded(spaceID: space.id, spaceKey: spaceKey)
         let trimmedCaption = caption?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -1145,34 +1338,104 @@ final class SpaceService {
             try encryptionService.encryptText($0, using: spaceKey)
         }
 
-        let mediaID = firestore.collection("spaces").document(space.id).collection("messages").document().documentID
+        let messageID = messageID ?? firestore.collection("spaces").document(space.id).collection("messages").document().documentID
         let messageReference = firestore.collection("spaces")
             .document(space.id)
             .collection("messages")
-            .document(mediaID)
-        let uploadResult = try await encryptedMediaService.uploadImage(
-            spaceID: space.id,
-            mediaID: mediaID,
-            originalData: imageData,
-            mediaType: resolvedMediaType,
-            uploadedBy: session.uid
-        )
-        let metadata = uploadResult.metadata
-        print("[SpaceService][ImageMessage] photoSelected=true imageDataByteCount=\(imageData.count) thumbnailByteCount=\(metadata.fileSize)")
-        print("[SpaceService][ImageMessage] uploadPath=\(metadata.storagePath)")
-        if let thumbnailStoragePath = metadata.thumbnailStoragePath {
-            print("[SpaceService][ImageMessage] uploadPath=\(thumbnailStoragePath)")
+            .document(messageID)
+        let attachmentResults = try await withThrowingTaskGroup(of: (Int, EncryptedMediaUploadResult).self) { group in
+            for (index, attachment) in imageAttachments.enumerated() {
+                group.addTask { [encryptedMediaService] in
+                    let attachmentMediaType = MediaType(rawValue: attachment.mediaCategory) ?? .photo
+                    let mediaID = imageAttachments.count == 1 ? messageID : "\(messageID)_\(index)"
+                    let uploadResult: EncryptedMediaUploadResult
+                    if attachmentMediaType == .gif {
+                        print("[GIF] Preparing upload")
+                        print("[GIF] Upload started")
+                        uploadResult = try await encryptedMediaService.uploadAnimatedImage(
+                            spaceID: space.id,
+                            mediaID: mediaID,
+                            originalData: attachment.data,
+                            previewImageData: attachment.previewImageData,
+                            mediaType: attachmentMediaType,
+                            mimeType: attachment.mimeType,
+                            uploadedBy: session.uid
+                        )
+                        print("[GIF] Upload finished")
+                    } else {
+                        uploadResult = try await encryptedMediaService.uploadImage(
+                            spaceID: space.id,
+                            mediaID: mediaID,
+                            originalData: attachment.data,
+                            mediaType: attachmentMediaType,
+                            mimeType: attachment.mimeType,
+                            uploadedBy: session.uid
+                        )
+                    }
+                    return (index, uploadResult)
+                }
+            }
+
+            var collected: [(Int, EncryptedMediaUploadResult)] = []
+            for try await result in group {
+                collected.append(result)
+            }
+            return collected.sorted { $0.0 < $1.0 }
+        }
+        let uploadedMedia = attachmentResults.map(\.1.metadata)
+        let metadata = uploadedMedia[0]
+        print("[SpaceService][ImageMessage] photoSelected=true imageDataByteCount=\(imageAttachments.reduce(0) { $0 + $1.data.count }) thumbnailByteCount=\(metadata.fileSize)")
+        for item in uploadedMedia {
+            print("[SpaceService][ImageMessage] uploadPath=\(item.storagePath)")
+            if let thumbnailStoragePath = item.thumbnailStoragePath {
+                print("[SpaceService][ImageMessage] uploadPath=\(thumbnailStoragePath)")
+            }
+        }
+
+        let mediaItemsPayload: [[String: Any]] = uploadedMedia.enumerated().map { index, item in
+            var payload: [String: Any] = [
+                "id": item.mediaId,
+                "mediaId": item.mediaId,
+                "order": index,
+                "mediaCategory": imageAttachments[index].mediaCategory,
+                "mediaType": item.mediaType.rawValue,
+                "storagePath": item.storagePath,
+                "mediaStoragePath": item.storagePath,
+                "nonce": item.nonce,
+                "mediaNonceBase64": item.nonce,
+                "encryptionVersion": item.encryptionVersion,
+                "mimeType": item.mimeType,
+                "fileSize": item.fileSize,
+                "uploadedBy": item.uploadedBy
+            ]
+            if let thumbnailStoragePath = item.thumbnailStoragePath {
+                payload["thumbnailStoragePath"] = thumbnailStoragePath
+            }
+            if let thumbnailNonce = item.thumbnailNonce {
+                payload["thumbnailNonce"] = thumbnailNonce
+                payload["thumbnailNonceBase64"] = thumbnailNonce
+            }
+            if let width = item.width {
+                payload["width"] = width
+            }
+            if let height = item.height {
+                payload["height"] = height
+            }
+            if let duration = item.duration {
+                payload["duration"] = duration
+            }
+            return payload
         }
 
         var messageData: [String: Any] = [
-            "id": mediaID,
+            "id": messageID,
             "mediaId": metadata.mediaId,
             "spaceId": space.id,
             "senderId": session.uid,
             "senderName": senderName,
             "senderEmoji": senderEmoji,
-            "type": MessageType.image.rawValue,
-            "mediaCategory": mediaCategory,
+            "type": resolvedMessageType.rawValue,
+            "mediaCategory": firstAttachment.mediaCategory,
             "mediaType": metadata.mediaType.rawValue,
             "storagePath": metadata.storagePath,
             "nonce": metadata.nonce,
@@ -1185,7 +1448,8 @@ final class SpaceService {
             "deleted": false,
             "createdAt": FieldValue.serverTimestamp(),
             "updatedAt": FieldValue.serverTimestamp(),
-            "status": "sent"
+            "status": "sent",
+            "mediaItems": mediaItemsPayload
         ]
         if let thumbnailStoragePath = metadata.thumbnailStoragePath {
             messageData["thumbnailStoragePath"] = thumbnailStoragePath
@@ -1208,46 +1472,64 @@ final class SpaceService {
             messageData["captionNonceBase64"] = encryptedCaption.nonce
         }
         addReplyContext(replyContext, to: &messageData)
-        try await setData(messageData, for: messageReference)
-        print("[SpaceService][ImageMessage] messageDocumentCreated=true messageId=\(mediaID)")
+        if resolvedMediaType == .gif {
+            print("[GIF] Firestore write starting")
+        }
+        do {
+            try await setData(messageData, for: messageReference)
+            if resolvedMediaType == .gif {
+                print("[GIF] Firestore write succeeded")
+            }
+        } catch {
+            if resolvedMediaType == .gif {
+                print("[GIF] Firestore write failed: \(error)")
+            }
+            throw error
+        }
+        print("[SpaceService][ImageMessage] messageDocumentCreated=true messageId=\(messageID)")
         await recordActivity(
             type: .photoShared,
             in: space,
             actorID: session.uid,
             actorName: senderName,
             actorEmoji: senderEmoji,
-            title: "shared a photo",
+            title: imageAttachments.count > 1 ? "shared photos" : (resolvedMediaType == .gif ? "shared a GIF" : (resolvedMediaType == .meme ? "shared a meme" : "shared a photo")),
             subtitle: trimmedCaption,
-            targetID: mediaID,
+            targetID: messageID,
             targetType: .photos
         )
 
+        let mediaItems = zip(uploadedMedia, imageAttachments).map { item, attachment in
+            SpaceMedia(
+                id: item.mediaId,
+                spaceID: space.id,
+                type: .image,
+                mediaCategory: attachment.mediaCategory,
+                mediaType: item.mediaType,
+                placeholderImageName: item.mediaType.defaultPlaceholderImageName,
+                caption: trimmedCaption,
+                senderName: senderName,
+                timestamp: Self.messageTimestampFormatter.string(from: Date()),
+                metadata: item,
+                mediaStoragePath: item.storagePath,
+                thumbnailStoragePath: item.thumbnailStoragePath,
+                mediaNonceBase64: item.nonce,
+                thumbnailNonceBase64: item.thumbnailNonce
+            )
+        }
+
         return SpaceMessage(
-            id: mediaID,
+            id: messageID,
             spaceId: space.id,
             senderId: session.uid,
             senderName: senderName,
             senderEmoji: senderEmoji,
-            type: .image,
+            type: resolvedMessageType,
             encryptionVersion: metadata.encryptionVersion,
             deleted: false,
             text: nil,
-            media: SpaceMedia(
-                id: mediaID,
-                spaceID: space.id,
-                type: .image,
-                mediaCategory: mediaCategory,
-                mediaType: metadata.mediaType,
-                placeholderImageName: metadata.mediaType.defaultPlaceholderImageName,
-                caption: trimmedCaption,
-                senderName: senderName,
-                timestamp: Self.messageTimestampFormatter.string(from: Date()),
-                metadata: metadata,
-                mediaStoragePath: metadata.storagePath,
-                thumbnailStoragePath: metadata.thumbnailStoragePath,
-                mediaNonceBase64: metadata.nonce,
-                thumbnailNonceBase64: metadata.thumbnailNonce
-            ),
+            media: mediaItems.first,
+            mediaItems: mediaItems,
             createdAt: Date(),
             updatedAt: Date(),
             timestamp: Self.messageTimestampFormatter.string(from: Date()),
@@ -1264,7 +1546,8 @@ final class SpaceService {
         videoData: Data,
         caption: String?,
         mimeType: String,
-        replyContext: MessageReplyContext? = nil
+        replyContext: MessageReplyContext? = nil,
+        messageID: String? = nil
     ) async throws -> SpaceMessage {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -1284,7 +1567,7 @@ final class SpaceService {
             try encryptionService.encryptText($0, using: spaceKey)
         }
 
-        let mediaID = firestore.collection("spaces").document(space.id).collection("messages").document().documentID
+        let mediaID = messageID ?? firestore.collection("spaces").document(space.id).collection("messages").document().documentID
         let messageReference = firestore.collection("spaces")
             .document(space.id)
             .collection("messages")
@@ -1742,14 +2025,17 @@ final class SpaceService {
             storagePath: storagePath,
             originalData: fileData,
             mimeType: mimeType,
-            uploadedBy: uploaderName
+            uploadedBy: session.uid
         )
 
         let metadata = uploadResult.metadata
+        let spaceKey = try await ensureGeneralEncryptionKey(in: space)
+        let encryptedFileName = try encryptionService.encryptText(fileName, using: spaceKey)
         try await setData([
             "id": fileReference.documentID,
             "spaceId": space.id,
-            "name": fileName,
+            "nameCiphertextBase64": encryptedFileName.ciphertext,
+            "nameNonceBase64": encryptedFileName.nonce,
             "mimeType": mimeType,
             "fileExtension": resolvedFileExtension,
             "storagePath": metadata.storagePath,
@@ -1810,9 +2096,16 @@ final class SpaceService {
             throw SpaceServiceError.invalidFileName
         }
         try await ensureFileManagementPermission(for: file, in: space)
+        let spaceKey = try await ensureGeneralEncryptionKey(in: space)
+        let encryptedFileName = try encryptionService.encryptText(trimmedName, using: spaceKey)
+        let resolvedFileExtension = (trimmedName as NSString).pathExtension.lowercased().nilIfEmpty
+            ?? file.fileExtension
 
         try await updateData([
-            "name": trimmedName,
+            "nameCiphertextBase64": encryptedFileName.ciphertext,
+            "nameNonceBase64": encryptedFileName.nonce,
+            "name": FieldValue.delete(),
+            "fileExtension": resolvedFileExtension,
             "updatedAt": FieldValue.serverTimestamp()
         ], for: firestore.collection("spaces").document(space.id).collection("files").document(file.id))
     }
@@ -2122,6 +2415,25 @@ final class SpaceService {
         return SpaceModule.configurableModules.filter { resolved.contains($0) }
     }
 
+    private func sanitizeModuleOrder(_ modules: [SpaceModule], enabledModules: [SpaceModule]) -> [SpaceModule] {
+        var ordered: [SpaceModule] = []
+
+        for module in modules where SpaceModule.allModules.contains(module) && !ordered.contains(module) {
+            ordered.append(module)
+        }
+
+        let fallback = enabledModules + SpaceModule.optionalModules.filter { !enabledModules.contains($0) } + [.settings]
+        for module in fallback where !ordered.contains(module) {
+            ordered.append(module)
+        }
+
+        for module in SpaceModule.allModules where !ordered.contains(module) {
+            ordered.append(module)
+        }
+
+        return SpaceModule.allModules.filter { ordered.contains($0) }
+    }
+
     private func latestEnabledModules(in space: Space) async throws -> [SpaceModule] {
         guard let firestore else {
             throw SpaceServiceError.firestoreNotConfigured
@@ -2145,9 +2457,21 @@ final class SpaceService {
         return sanitizeEnabledModules(template.defaultEnabledModules, for: template)
     }
 
+    private func parseModuleOrder(
+        from data: [String: Any],
+        template: SpaceTemplate,
+        enabledModules: [SpaceModule]
+    ) -> [SpaceModule] {
+        let storedOrder = (data["moduleOrder"] as? [String] ?? [])
+            .compactMap(SpaceModule.init(rawValue:))
+        let fallback = storedOrder.isEmpty ? template.defaultModuleOrder : storedOrder
+        return sanitizeModuleOrder(fallback, enabledModules: enabledModules)
+    }
+
     private func mappedSpace(data: [String: Any], documentID: String) -> Space {
         let template = (data["template"] as? String).flatMap(SpaceTemplate.init(rawValue:)) ?? .custom
         let enabledModules = parseEnabledModules(from: data, template: template)
+        let moduleOrder = parseModuleOrder(from: data, template: template, enabledModules: enabledModules)
         return Space(
             id: data["id"] as? String ?? documentID,
             name: data["name"] as? String ?? "Untitled Space",
@@ -2158,8 +2482,20 @@ final class SpaceService {
             ownerId: data["ownerId"] as? String ?? "",
             memberIds: data["memberIds"] as? [String] ?? [],
             unreadCount: nil,
-            enabledModules: enabledModules
+            enabledModules: enabledModules,
+            moduleOrder: moduleOrder
         )
+    }
+
+    private func normalizedSpaceOrder(_ spaceIDs: [String]) -> [String] {
+        var seen = Set<String>()
+        return spaceIDs.compactMap { rawID in
+            let trimmed = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else {
+                return nil
+            }
+            return trimmed
+        }
     }
 
     private func mapSpace(document: DocumentSnapshot) -> Space? {
@@ -2189,13 +2525,24 @@ final class SpaceService {
         )
     }
 
-    private func mapFile(document: DocumentSnapshot) -> SpaceFileItem? {
+    private func mapFile(document: DocumentSnapshot, spaceKey: SymmetricKey) throws -> SpaceFileItem? {
         guard let data = document.data() else { return nil }
         let sizeNumber = data["fileSize"] as? NSNumber
+        let resolvedName: String
+        if let ciphertext = (data["nameCiphertextBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+           let nonce = (data["nameNonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+            resolvedName = (try? encryptionService.decryptText(
+                ciphertext: ciphertext,
+                nonce: nonce,
+                using: spaceKey
+            )) ?? "Untitled File"
+        } else {
+            resolvedName = (data["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Untitled File"
+        }
         return SpaceFileItem(
             id: data["id"] as? String ?? document.documentID,
             spaceID: data["spaceId"] as? String ?? document.reference.parent.parent?.documentID ?? "",
-            name: data["name"] as? String ?? "Untitled File",
+            name: resolvedName,
             mimeType: data["mimeType"] as? String ?? "application/octet-stream",
             folderId: (data["folderId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             storagePath: data["storagePath"] as? String ?? "spaces/\(document.reference.parent.parent?.documentID ?? "")/files/\(document.documentID).enc",
@@ -2203,7 +2550,7 @@ final class SpaceService {
             nonceBase64: data["nonceBase64"] as? String ?? "",
             uploadedBy: data["uploadedBy"] as? String ?? "",
             uploadedByName: data["uploadedByName"] as? String ?? "Member",
-            fileExtension: data["fileExtension"] as? String ?? ((data["name"] as? String).map { ($0 as NSString).pathExtension.lowercased() } ?? "dat"),
+            fileExtension: data["fileExtension"] as? String ?? (resolvedName as NSString).pathExtension.lowercased().nilIfEmpty ?? "dat",
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
             updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue(),
             sizeBytes: sizeNumber?.int64Value ?? 0,
@@ -2397,6 +2744,7 @@ final class SpaceService {
             print("[SpaceService][Activity] Skipping activity write because no visible users were resolved for space \(space.id)")
             return
         }
+        let sanitizedSubtitle = sanitizedActivitySubtitle(for: type, original: subtitle)
         var payload: [String: Any] = [
             "id": activityReference.documentID,
             "spaceId": space.id,
@@ -2414,8 +2762,8 @@ final class SpaceService {
         if let actorEmoji, !actorEmoji.isEmpty {
             payload["actorEmoji"] = actorEmoji
         }
-        if let subtitle, !subtitle.isEmpty {
-            payload["subtitle"] = subtitle
+        if let sanitizedSubtitle, !sanitizedSubtitle.isEmpty {
+            payload["subtitle"] = sanitizedSubtitle
         }
         if let targetID, !targetID.isEmpty {
             payload["targetId"] = targetID
@@ -2433,7 +2781,7 @@ final class SpaceService {
                 actorName: actorName,
                 actorEmoji: actorEmoji,
                 title: title,
-                subtitle: subtitle,
+                subtitle: sanitizedSubtitle,
                 targetID: targetID,
                 targetType: targetType,
                 visibleUserIDs: visibleUserIDs
@@ -2526,11 +2874,22 @@ final class SpaceService {
         }
     }
 
+    private func sanitizedActivitySubtitle(for activityType: ActivityItemType, original: String?) -> String? {
+        switch activityType {
+        case .photoShared, .videoShared, .fileUploaded:
+            return nil
+        default:
+            return original
+        }
+    }
+
     private func sanitizedNotificationSubtitle(for activityType: ActivityItemType, original: String?) -> String? {
         switch activityType {
         case .messageSent, .replyAdded, .reactionAdded, .photoShared, .videoShared, .memberJoined:
             return nil
-        case .fileUploaded, .pollCreated, .eventCreated, .eventUpdated:
+        case .fileUploaded:
+            return nil
+        case .pollCreated, .eventCreated, .eventUpdated:
             return original
         case .spaceCreated, .pollVoted:
             return nil
@@ -2590,7 +2949,7 @@ final class SpaceService {
         let isEdited = data["edited"] as? Bool ?? false
         let editedAt = (data["editedAt"] as? Timestamp)?.dateValue()
         let replyContext = mappedReplyContext(from: data)
-        if type == .image || type == .video {
+        if type == .image || type == .video || type == .meme || type == .gif {
             if deleted {
                 return SpaceMessage(
                     id: data["id"] as? String ?? document.documentID,
@@ -2618,36 +2977,35 @@ final class SpaceService {
             let caption: String?
             if let captionCiphertext = (data["captionCiphertextBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                let captionNonce = (data["captionNonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
-                caption = try? encryptionService.decryptText(
-                    ciphertext: captionCiphertext,
-                    nonce: captionNonce,
-                    using: spaceKey
-                )
+                do {
+                    caption = try encryptionService.decryptText(
+                        ciphertext: captionCiphertext,
+                        nonce: captionNonce,
+                        using: spaceKey
+                    )
+                } catch {
+                    if type == .gif {
+                        print("[GIF Receive] caption decrypt failed id=\(document.documentID) error=\(error)")
+                    }
+                    caption = nil
+                }
             } else {
                 caption = nil
             }
-            let mediaCategory = (data["mediaCategory"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-            let resolvedMediaType = (data["mediaType"] as? String)
-                .flatMap(MediaType.init(rawValue:))
-                ?? MediaType(rawValue: mediaCategory ?? "")
-                ?? .photo
-            let metadata = EncryptedMediaMetadata(
-                mediaId: (data["mediaId"] as? String) ?? (data["id"] as? String ?? document.documentID),
-                mediaType: resolvedMediaType,
-                storagePath: (data["storagePath"] as? String) ?? (data["mediaStoragePath"] as? String) ?? "",
-                thumbnailStoragePath: (data["thumbnailStoragePath"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                encryptionVersion: inferredGeneralEncryptionVersion(from: data),
-                nonce: (data["nonce"] as? String) ?? (data["mediaNonceBase64"] as? String) ?? "",
-                thumbnailNonce: (data["thumbnailNonce"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                    ?? (data["thumbnailNonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                mimeType: (data["mimeType"] as? String) ?? "image/jpeg",
-                fileSize: data["fileSize"] as? Int ?? 0,
-                width: data["width"] as? Int,
-                height: data["height"] as? Int,
-                duration: data["duration"] as? Double,
+            let mediaItems = mappedMediaItems(
+                from: data,
+                documentID: document.documentID,
+                spaceID: data["spaceId"] as? String,
+                senderID: senderID,
+                senderName: data["senderName"] as? String ?? "Member",
+                caption: caption,
                 createdAt: createdAt,
-                uploadedBy: (data["uploadedBy"] as? String) ?? (senderID ?? "")
+                fallbackType: type
             )
+            let primaryMedia = mediaItems.first
+            if let primaryMedia, type == .gif || primaryMedia.mediaCategory == "gif" || primaryMedia.mediaType == .gif {
+                print("[GIF Receive] message model mapped id=\(document.documentID) type=\(type.rawValue) mediaCategory=\(primaryMedia.mediaCategory ?? "") mediaType=\(primaryMedia.mediaType.rawValue) storagePath=\(primaryMedia.mediaStoragePath ?? "") thumbnailStoragePath=\(primaryMedia.thumbnailStoragePath ?? "")")
+            }
             return SpaceMessage(
                 id: data["id"] as? String ?? document.documentID,
                 spaceId: data["spaceId"] as? String,
@@ -2658,22 +3016,8 @@ final class SpaceService {
                 encryptionVersion: inferredGeneralEncryptionVersion(from: data),
                 deleted: deleted,
                 text: nil,
-                media: SpaceMedia(
-                    id: data["id"] as? String ?? document.documentID,
-                    spaceID: data["spaceId"] as? String,
-                    type: type,
-                    mediaCategory: mediaCategory,
-                    mediaType: resolvedMediaType,
-                    placeholderImageName: resolvedMediaType.defaultPlaceholderImageName,
-                    caption: caption,
-                    senderName: data["senderName"] as? String ?? "Member",
-                    timestamp: Self.messageTimestampFormatter.string(from: createdAt ?? Date()),
-                    metadata: metadata,
-                    mediaStoragePath: metadata.storagePath,
-                    thumbnailStoragePath: metadata.thumbnailStoragePath,
-                    mediaNonceBase64: metadata.nonce,
-                    thumbnailNonceBase64: metadata.thumbnailNonce
-                ),
+                media: primaryMedia,
+                mediaItems: mediaItems,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 timestamp: Self.messageTimestampFormatter.string(from: createdAt ?? Date()),
@@ -2715,6 +3059,8 @@ final class SpaceService {
             )
         }
         let resolvedText: String
+        let resolvedLinkPreview: LinkPreviewData?
+        let resolvedSpaceLinks: [SpaceLinkAttachment]
         switch inferredEncryptionVersion {
         case let version where version == generalEncryptionVersion:
             guard
@@ -2722,6 +3068,8 @@ final class SpaceService {
                 let nonce = (data["nonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
             else {
                 resolvedText = "Unable to decrypt message"
+                resolvedLinkPreview = nil
+                resolvedSpaceLinks = []
                 break
             }
             logStoredMessagePayload(
@@ -2733,14 +3081,20 @@ final class SpaceService {
             )
 
             do {
-                resolvedText = try encryptionService.decryptText(
+                let decryptedContent = try encryptionService.decryptText(
                     ciphertext: ciphertext,
                     nonce: nonce,
                     using: spaceKey
                 )
+                let decodedContent = decodeTextMessageContent(from: decryptedContent)
+                resolvedText = decodedContent.text
+                resolvedLinkPreview = decodedContent.linkPreview
+                resolvedSpaceLinks = decodedContent.spaceLinks
             } catch {
                 print("[SpaceService][DecryptFailure] messageId=\(data["id"] as? String ?? document.documentID) reason=\(error.localizedDescription)")
                 resolvedText = "Unable to decrypt message"
+                resolvedLinkPreview = nil
+                resolvedSpaceLinks = []
             }
         default:
             return nil
@@ -2766,6 +3120,8 @@ final class SpaceService {
             isEdited: isEdited,
             editedAt: editedAt,
             replyContext: replyContext,
+            linkPreview: resolvedLinkPreview,
+            spaceLinks: resolvedSpaceLinks,
             reactions: []
         )
     }
@@ -2788,6 +3144,105 @@ final class SpaceService {
             return nil
         }
         return MessageReplyContext(messageId: messageId, senderName: senderName, type: type, preview: preview)
+    }
+
+    private func encodeTextMessageContent(
+        text: String,
+        linkPreview: LinkPreviewData?,
+        spaceLinks: [SpaceLinkAttachment]
+    ) throws -> String {
+        let content = EncryptedTextMessageContent(
+            version: 1,
+            text: text,
+            linkPreview: linkPreview,
+            spaceLinks: spaceLinks.isEmpty ? nil : spaceLinks
+        )
+        let data = try JSONEncoder().encode(content)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw SpaceServiceError.unableToLoadMessages
+        }
+        return json
+    }
+
+    private func decodeTextMessageContent(from decryptedValue: String) -> (text: String, linkPreview: LinkPreviewData?, spaceLinks: [SpaceLinkAttachment]) {
+        guard let data = decryptedValue.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(EncryptedTextMessageContent.self, from: data) else {
+            return (decryptedValue, nil, [])
+        }
+        return (decoded.text, decoded.linkPreview, decoded.spaceLinks ?? [])
+    }
+
+    private func mappedMediaItems(
+        from data: [String: Any],
+        documentID: String,
+        spaceID: String?,
+        senderID: String?,
+        senderName: String,
+        caption: String?,
+        createdAt: Date?,
+        fallbackType: MessageType
+    ) -> [SpaceMedia] {
+        let sortedItems = (data["mediaItems"] as? [[String: Any]])?.sorted {
+            ($0["order"] as? Int ?? 0) < ($1["order"] as? Int ?? 0)
+        } ?? []
+        let itemDictionaries = sortedItems.isEmpty ? [data] : sortedItems
+
+        return itemDictionaries.compactMap { item in
+            let mediaCategory = (item["mediaCategory"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            let resolvedMediaType = (item["mediaType"] as? String)
+                .flatMap(MediaType.init(rawValue:))
+                ?? MediaType(rawValue: mediaCategory ?? "")
+                ?? .photo
+            let metadata = EncryptedMediaMetadata(
+                mediaId: (item["mediaId"] as? String) ?? (item["id"] as? String) ?? documentID,
+                mediaType: resolvedMediaType,
+                storagePath: (item["storagePath"] as? String) ?? (item["mediaStoragePath"] as? String) ?? "",
+                thumbnailStoragePath: (item["thumbnailStoragePath"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                encryptionVersion: inferredGeneralEncryptionVersion(from: item),
+                nonce: (item["nonce"] as? String) ?? (item["mediaNonceBase64"] as? String) ?? "",
+                thumbnailNonce: (item["thumbnailNonce"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? (item["thumbnailNonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                mimeType: (item["mimeType"] as? String) ?? "image/jpeg",
+                fileSize: item["fileSize"] as? Int ?? 0,
+                width: item["width"] as? Int,
+                height: item["height"] as? Int,
+                duration: item["duration"] as? Double,
+                createdAt: createdAt,
+                uploadedBy: (item["uploadedBy"] as? String) ?? (senderID ?? "")
+            )
+            guard !metadata.storagePath.isEmpty, !metadata.nonce.isEmpty else {
+                return nil
+            }
+
+            let resolvedType: MessageType
+            switch resolvedMediaType {
+            case .video:
+                resolvedType = .video
+            case .gif:
+                resolvedType = .gif
+            case .meme:
+                resolvedType = .meme
+            default:
+                resolvedType = fallbackType == .video ? .video : .image
+            }
+
+            return SpaceMedia(
+                id: (item["id"] as? String) ?? metadata.mediaId,
+                spaceID: spaceID,
+                type: resolvedType,
+                mediaCategory: mediaCategory,
+                mediaType: resolvedMediaType,
+                placeholderImageName: resolvedMediaType.defaultPlaceholderImageName,
+                caption: caption,
+                senderName: senderName,
+                timestamp: Self.messageTimestampFormatter.string(from: createdAt ?? Date()),
+                metadata: metadata,
+                mediaStoragePath: metadata.storagePath,
+                thumbnailStoragePath: metadata.thumbnailStoragePath,
+                mediaNonceBase64: metadata.nonce,
+                thumbnailNonceBase64: metadata.thumbnailNonce
+            )
+        }
     }
 
     private func deliveryStatus(for status: String?, isOutgoing: Bool) -> String? {

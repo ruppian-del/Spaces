@@ -7,9 +7,18 @@ struct MessageReplyPresentation: Hashable {
     let isUnavailable: Bool
 }
 
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
 struct MessageBubbleView: View {
+    @Environment(\.openURL) private var openURL
+
     let message: SpaceMessage
     let onTapMedia: (SpaceMedia) -> Void
+    var onTapSpaceLink: ((SpaceLinkAttachment) -> Void)? = nil
     var onDelete: (() -> Void)? = nil
     var onReply: (() -> Void)? = nil
     var onEdit: (() -> Void)? = nil
@@ -17,6 +26,8 @@ struct MessageBubbleView: View {
     var onTapReplyPreview: (() -> Void)? = nil
     var onCopyText: (() -> Void)? = nil
     var onSaveMedia: (() -> Void)? = nil
+    var onRetryFailedMessage: (() -> Void)? = nil
+    var onDeleteFailedMessage: (() -> Void)? = nil
     var reactionOptions: [String] = []
     var onToggleReaction: ((String) -> Void)? = nil
     var showsSenderName: Bool = true
@@ -46,10 +57,12 @@ struct MessageBubbleView: View {
                 replyPreview(replyPresentation, alignment: alignment)
             }
 
-            if let media = message.media {
-                mediaBubble(for: media)
-            } else if let text = message.text {
+            if message.hasMediaAttachments {
+                mediaBubble(for: message.resolvedMediaItems)
+            } else if let text = message.text, !text.isEmpty {
                 textBubble(text)
+            } else if !message.spaceLinks.isEmpty {
+                linksOnlyBubble
             }
 
             HStack(spacing: 6) {
@@ -70,6 +83,19 @@ struct MessageBubbleView: View {
                     }
             }
 
+            if message.isOutgoing, message.localDeliveryState == .failed {
+                HStack(spacing: 12) {
+                    if let onRetryFailedMessage {
+                        Button("Retry", action: onRetryFailedMessage)
+                            .font(.caption.weight(.semibold))
+                    }
+                    if let onDeleteFailedMessage {
+                        Button("Delete", role: .destructive, action: onDeleteFailedMessage)
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+            }
+
             if !message.reactions.isEmpty {
                 reactionChips(alignment: alignment)
             }
@@ -79,67 +105,192 @@ struct MessageBubbleView: View {
     }
 
     private func textBubble(_ text: String) -> some View {
-        highlightedText(text, font: .body, foreground: message.isOutgoing ? .white : .primary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(message.isOutgoing ? Color.accentColor : Color(.tertiarySystemFill))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(
-                        isHighlighted ? Color.accentColor.opacity(0.5) : (message.isOutgoing ? Color.clear : Color.black.opacity(0.06)),
-                        lineWidth: 1
-                    )
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .modifier(MessageBubbleContextMenuModifier(
-                reactionOptions: reactionOptions,
-                currentReactionEmoji: currentReactionEmoji,
-                onToggleReaction: onToggleReaction,
-                onReply: onReply,
-                onEdit: onEdit,
-                onCopyText: onCopyText,
-                onSaveMedia: onSaveMedia,
-                onDelete: onDelete
-            ))
-            .modifier(MessageBubbleSwipeReplyModifier(onReply: onReply))
+        VStack(alignment: .leading, spacing: 10) {
+            highlightedText(text, font: .body, foreground: message.isOutgoing ? .white : .primary)
+
+            if let linkPreview = message.linkPreview {
+                linkPreviewCard(linkPreview)
+            }
+
+            if !message.spaceLinks.isEmpty {
+                spaceLinksColumn
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(message.isOutgoing ? Color.accentColor : Color(.tertiarySystemFill))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    isHighlighted ? Color.accentColor.opacity(0.5) : (message.isOutgoing ? Color.clear : Color.black.opacity(0.06)),
+                    lineWidth: 1
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .modifier(MessageBubbleContextMenuModifier(
+            reactionOptions: reactionOptions,
+            currentReactionEmoji: currentReactionEmoji,
+            onToggleReaction: onToggleReaction,
+            onReply: onReply,
+            onEdit: onEdit,
+            onCopyText: onCopyText,
+            onSaveMedia: onSaveMedia,
+            onDelete: onDelete
+        ))
+        .modifier(MessageBubbleSwipeReplyModifier(onReply: onReply))
     }
 
-    private func mediaBubble(for media: SpaceMedia) -> some View {
+    private var linksOnlyBubble: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            spaceLinksColumn
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(message.isOutgoing ? Color.accentColor : Color(.tertiarySystemFill))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    isHighlighted ? Color.accentColor.opacity(0.5) : (message.isOutgoing ? Color.clear : Color.black.opacity(0.06)),
+                    lineWidth: 1
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .modifier(MessageBubbleContextMenuModifier(
+            reactionOptions: reactionOptions,
+            currentReactionEmoji: currentReactionEmoji,
+            onToggleReaction: onToggleReaction,
+            onReply: onReply,
+            onEdit: onEdit,
+            onCopyText: onCopyText,
+            onSaveMedia: onSaveMedia,
+            onDelete: onDelete
+        ))
+        .modifier(MessageBubbleSwipeReplyModifier(onReply: onReply))
+    }
+
+    @ViewBuilder
+    private func linkPreviewCard(_ preview: LinkPreviewData) -> some View {
         Button {
-            onTapMedia(media)
+            guard let url = URL(string: preview.originalURL) else { return }
+            openURL(url)
         } label: {
             VStack(alignment: .leading, spacing: 10) {
-                EncryptedMediaThumbnailView(
-                    media: media,
-                    tint: mediaBubbleFill,
-                    accentColor: mediaAccentColor
-                )
-                .frame(width: 224, height: 156)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                if let imageData = preview.imageData, let image = UIImage(data: imageData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 132)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
 
-                if let caption = media.caption, !caption.isEmpty {
-                    Text(caption)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(preview.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(message.isOutgoing ? .white : .primary)
+                        .lineLimit(2)
+
+                    if let summary = preview.summary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.footnote)
+                            .foregroundStyle(message.isOutgoing ? Color.white.opacity(0.92) : .secondary)
+                            .lineLimit(3)
+                    }
+
+                    Text(preview.domain)
+                        .font(.caption)
+                        .foregroundStyle(message.isOutgoing ? Color.white.opacity(0.78) : .secondary)
+                        .lineLimit(1)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(message.isOutgoing ? Color.accentColor.opacity(0.12) : Color(.tertiarySystemFill))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(
-                        isHighlighted ? Color.accentColor.opacity(0.5) : (message.isOutgoing ? Color.accentColor.opacity(0.18) : Color.black.opacity(0.06)),
-                        lineWidth: 1
-                    )
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(message.isOutgoing ? Color.white.opacity(0.14) : Color(.systemBackground).opacity(0.88))
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(preview.title). \(preview.domain)")
+    }
+
+    private var spaceLinksColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(message.spaceLinks) { link in
+                spaceLinkCard(link)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func spaceLinkCard(_ link: SpaceLinkAttachment) -> some View {
+        Button {
+            onTapSpaceLink?(link)
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Image(systemName: link.icon)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(message.isOutgoing ? .white : .accentColor)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(link.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(message.isOutgoing ? .white : .primary)
+                            .lineLimit(2)
+
+                        Text(link.subtitle?.nilIfEmpty ?? link.moduleType.title)
+                            .font(.caption)
+                            .foregroundStyle(message.isOutgoing ? Color.white.opacity(0.82) : .secondary)
+                            .lineLimit(2)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                Text("Tap to Open")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(message.isOutgoing ? Color.white.opacity(0.76) : .secondary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(message.isOutgoing ? Color.white.opacity(0.14) : Color(.systemBackground).opacity(0.88))
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(link.title). \(link.subtitle?.nilIfEmpty ?? link.moduleType.title). Tap to open.")
+    }
+
+    private func mediaBubble(for mediaItems: [SpaceMedia]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            mediaLayout(for: mediaItems)
+
+            if let caption = message.primaryMedia?.caption, !caption.isEmpty {
+                Text(caption)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(message.isOutgoing ? Color.accentColor.opacity(0.12) : Color(.tertiarySystemFill))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(
+                    isHighlighted ? Color.accentColor.opacity(0.5) : (message.isOutgoing ? Color.accentColor.opacity(0.18) : Color.black.opacity(0.06)),
+                    lineWidth: 1
+                )
+        )
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .modifier(MessageBubbleContextMenuModifier(
             reactionOptions: reactionOptions,
@@ -152,6 +303,87 @@ struct MessageBubbleView: View {
             onDelete: onDelete
         ))
         .modifier(MessageBubbleSwipeReplyModifier(onReply: onReply))
+    }
+
+    @ViewBuilder
+    private func mediaLayout(for mediaItems: [SpaceMedia]) -> some View {
+        switch mediaItems.count {
+        case 1:
+            mediaThumbnailButton(for: mediaItems[0], in: mediaItems, index: 0, width: 224, height: 156)
+        case 2:
+            HStack(spacing: 8) {
+                mediaThumbnailButton(for: mediaItems[0], in: mediaItems, index: 0, width: 108, height: 156)
+                mediaThumbnailButton(for: mediaItems[1], in: mediaItems, index: 1, width: 108, height: 156)
+            }
+        case 3:
+            HStack(spacing: 8) {
+                mediaThumbnailButton(for: mediaItems[0], in: mediaItems, index: 0, width: 132, height: 180)
+                VStack(spacing: 8) {
+                    mediaThumbnailButton(for: mediaItems[1], in: mediaItems, index: 1, width: 84, height: 86)
+                    mediaThumbnailButton(for: mediaItems[2], in: mediaItems, index: 2, width: 84, height: 86)
+                }
+            }
+        default:
+            LazyVGrid(columns: mediaGridColumns, spacing: 8) {
+                ForEach(Array(mediaItems.prefix(4).enumerated()), id: \.element.id) { index, media in
+                    mediaThumbnailButton(
+                        for: media,
+                        in: mediaItems,
+                        index: index,
+                        width: 108,
+                        height: 108,
+                        overlayText: gridOverlayText(for: mediaItems, at: index)
+                    )
+                }
+            }
+            .frame(width: 224)
+        }
+    }
+
+    private var mediaGridColumns: [GridItem] {
+        [
+            GridItem(.fixed(108), spacing: 8),
+            GridItem(.fixed(108), spacing: 8)
+        ]
+    }
+
+    private func gridOverlayText(for mediaItems: [SpaceMedia], at index: Int) -> String? {
+        guard index == 3, mediaItems.count > 4 else { return nil }
+        return "+\(mediaItems.count - 4)"
+    }
+
+    private func mediaThumbnailButton(
+        for media: SpaceMedia,
+        in mediaItems: [SpaceMedia],
+        index: Int,
+        width: CGFloat,
+        height: CGFloat,
+        overlayText: String? = nil
+    ) -> some View {
+        Button {
+            onTapMedia(media.withGallery(items: mediaItems, selectedIndex: index))
+        } label: {
+            ZStack {
+                EncryptedMediaThumbnailView(
+                    media: media,
+                    tint: mediaBubbleFill,
+                    accentColor: mediaAccentColor
+                )
+                .frame(width: width, height: height)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                if let overlayText {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.black.opacity(0.36))
+
+                    Text(overlayText)
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     @ViewBuilder
@@ -363,7 +595,20 @@ private struct EncryptedMediaThumbnailView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(tint)
 
-            if let image {
+            if media.type == .gif || media.mediaType == .gif {
+                AnimatedGIFBubbleView(media: media)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            } else if let localPreviewImageData = media.localPreviewImageData, let previewImage = UIImage(data: localPreviewImageData) {
+                Image(uiImage: previewImage)
+                    .resizable()
+                    .scaledToFill()
+                if media.type == .video {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 38))
+                        .foregroundStyle(.white)
+                        .shadow(radius: 4)
+                }
+            } else if let image {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -388,6 +633,7 @@ private struct EncryptedMediaThumbnailView: View {
             }
         }
         .task(id: media.id) {
+            guard !(media.type == .gif || media.mediaType == .gif) else { return }
             guard image == nil else { return }
             do {
                 let data = try await encryptedMediaService.thumbnailData(for: media)
@@ -396,9 +642,64 @@ private struct EncryptedMediaThumbnailView: View {
                     isLoading = false
                 }
             } catch {
+                if media.type == .gif || media.mediaType == .gif {
+                    print("[GIF Receive] thumbnail download/decryption failed id=\(media.id) error=\(error)")
+                }
                 await MainActor.run {
                     isLoading = false
                 }
+            }
+        }
+    }
+}
+
+private struct AnimatedGIFBubbleView: View {
+    let media: SpaceMedia
+
+    private let encryptedMediaService = EncryptedMediaService()
+    @State private var gifURL: URL?
+    @State private var isLoading = true
+
+    var body: some View {
+        ZStack {
+            if let gifURL {
+                AnimatedGIFView(fileURL: gifURL, contentMode: .fit)
+                    .onAppear {
+                        print("[GIF Receive] animated rendering started id=\(media.id)")
+                    }
+            } else if isLoading {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: media.placeholderImageName)
+                        .font(.system(size: 36, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                    Text("GIF")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+            }
+        }
+        .task(id: media.id) {
+            guard gifURL == nil else { return }
+            do {
+                let url = try await encryptedMediaService.temporaryMediaURL(for: media)
+                print("[GIF Receive] full GIF download/decryption success id=\(media.id) url=\(url.lastPathComponent)")
+                await MainActor.run {
+                    gifURL = url
+                    isLoading = false
+                }
+            } catch {
+                print("[GIF Receive] full GIF download/decryption failed id=\(media.id) error=\(error)")
+                await MainActor.run {
+                    isLoading = false
+                }
+            }
+        }
+        .onDisappear {
+            if let gifURL {
+                try? FileManager.default.removeItem(at: gifURL)
             }
         }
     }

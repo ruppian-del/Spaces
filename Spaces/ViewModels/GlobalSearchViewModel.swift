@@ -156,7 +156,12 @@ final class GlobalSearchViewModel: ObservableObject {
                 if Task.isCancelled { return }
                 let messages = (try? await spaceService.fetchRecentMessages(in: space, limit: 25)) ?? []
                 for message in messages where !message.deleted {
-                    let searchable = [message.senderName, message.text ?? "", message.replyContext?.preview ?? ""]
+                    let searchable = [
+                        message.senderName,
+                        message.text ?? "",
+                        message.replyContext?.preview ?? "",
+                        message.spaceLinks.map(\.searchableText).joined(separator: "\n")
+                    ]
                         .joined(separator: "\n")
                         .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                     guard searchable.contains(normalizedQuery) else { continue }
@@ -166,7 +171,9 @@ final class GlobalSearchViewModel: ObservableObject {
                             conversationKind: .space(space),
                             title: space.name,
                             subtitle: message.senderName,
-                            preview: message.text?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Message",
+                            preview: message.text?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                                ?? message.spaceLinks.first?.title
+                                ?? "Message",
                             createdAt: message.createdAt
                         )
                     )
@@ -177,7 +184,12 @@ final class GlobalSearchViewModel: ObservableObject {
                 if Task.isCancelled { return }
                 let messages = (try? await pingService.fetchRecentMessages(in: ping, limit: 25)) ?? []
                 for message in messages where !message.deleted {
-                    let searchable = [message.senderName, message.text ?? "", message.replyContext?.preview ?? ""]
+                    let searchable = [
+                        message.senderName,
+                        message.text ?? "",
+                        message.replyContext?.preview ?? "",
+                        message.spaceLinks.map(\.searchableText).joined(separator: "\n")
+                    ]
                         .joined(separator: "\n")
                         .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                     guard searchable.contains(normalizedQuery) else { continue }
@@ -187,7 +199,9 @@ final class GlobalSearchViewModel: ObservableObject {
                             conversationKind: .ping(ping),
                             title: ping.title(for: pingService.currentUserID()),
                             subtitle: message.senderName,
-                            preview: message.text?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Message",
+                            preview: message.text?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                                ?? message.spaceLinks.first?.title
+                                ?? "Message",
                             createdAt: message.createdAt
                         )
                     )

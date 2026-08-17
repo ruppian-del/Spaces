@@ -12,6 +12,7 @@ final class NotificationsViewModel: ObservableObject {
     @Published private(set) var items: [SpaceNotificationItem] = []
     @Published private(set) var spacesByID: [String: Space] = [:]
     @Published private(set) var isLoading = false
+    @Published private(set) var isMarkingAllRead = false
     @Published var activeError: NotificationError?
 
     private let spaceService: SpaceService
@@ -85,6 +86,24 @@ final class NotificationsViewModel: ObservableObject {
             enqueueStateUpdate { [weak self] in
                 self?.activeError = NotificationError(message: message)
             }
+        }
+    }
+
+    func markAllRead() async {
+        guard unreadCount > 0, !isMarkingAllRead else { return }
+        isMarkingAllRead = true
+
+        do {
+            try await spaceService.markAllNotificationsRead()
+        } catch {
+            let message = error.localizedDescription
+            enqueueStateUpdate { [weak self] in
+                self?.activeError = NotificationError(message: message)
+            }
+        }
+
+        enqueueStateUpdate { [weak self] in
+            self?.isMarkingAllRead = false
         }
     }
 

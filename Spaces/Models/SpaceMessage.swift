@@ -1,10 +1,99 @@
 import Foundation
 
-struct MessageReplyContext: Hashable {
+enum LocalMessageDeliveryState: String, Codable, Hashable {
+    case sending
+    case uploading
+    case waitingForConnection
+    case failed
+}
+
+struct MessageReplyContext: Codable, Hashable {
     let messageId: String
     let senderName: String
     let type: String
     let preview: String
+}
+
+struct LinkPreviewData: Codable, Hashable {
+    let originalURL: String
+    let canonicalURL: String?
+    let domain: String
+    let title: String
+    let summary: String?
+    let siteName: String?
+    let imageDataBase64: String?
+    let imageMimeType: String?
+
+    var displayURL: String {
+        canonicalURL ?? originalURL
+    }
+
+    var imageData: Data? {
+        guard let imageDataBase64 else { return nil }
+        return Data(base64Encoded: imageDataBase64)
+    }
+}
+
+enum SpaceLinkModuleType: String, Codable, CaseIterable, Hashable {
+    case polls
+    case files
+    case events
+
+    var title: String {
+        switch self {
+        case .polls: return "Poll"
+        case .files: return "File"
+        case .events: return "Event"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .polls: return "chart.bar.xaxis"
+        case .files: return "folder.fill"
+        case .events: return "calendar"
+        }
+    }
+
+    var emoji: String {
+        switch self {
+        case .polls: return "📊"
+        case .files: return "📁"
+        case .events: return "📅"
+        }
+    }
+}
+
+struct SpaceLinkAttachment: Identifiable, Codable, Hashable {
+    let id: String
+    let moduleType: SpaceLinkModuleType
+    let targetId: String
+    let title: String
+    let subtitle: String?
+    let icon: String
+    let version: Int
+
+    init(
+        id: String = UUID().uuidString,
+        moduleType: SpaceLinkModuleType,
+        targetId: String,
+        title: String,
+        subtitle: String? = nil,
+        icon: String? = nil,
+        version: Int = 1
+    ) {
+        self.id = id
+        self.moduleType = moduleType
+        self.targetId = targetId
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon ?? moduleType.icon
+        self.version = version
+    }
+
+    var searchableText: String {
+        [title, subtitle ?? "", moduleType.title].joined(separator: "\n")
+    }
 }
 
 struct SpaceMessage: Identifiable, Hashable {
@@ -18,6 +107,7 @@ struct SpaceMessage: Identifiable, Hashable {
     let deleted: Bool
     let text: String?
     let media: SpaceMedia?
+    let mediaItems: [SpaceMedia]
     let createdAt: Date?
     let updatedAt: Date?
     let timestamp: String
@@ -27,7 +117,11 @@ struct SpaceMessage: Identifiable, Hashable {
     let isEdited: Bool
     let editedAt: Date?
     let replyContext: MessageReplyContext?
+    let linkPreview: LinkPreviewData?
+    let spaceLinks: [SpaceLinkAttachment]
     let reactions: [MessageReaction]
+    let localDeliveryState: LocalMessageDeliveryState?
+    let localFailureMessage: String?
 
     init(
         id: String,
@@ -40,6 +134,7 @@ struct SpaceMessage: Identifiable, Hashable {
         deleted: Bool = false,
         text: String? = nil,
         media: SpaceMedia? = nil,
+        mediaItems: [SpaceMedia] = [],
         createdAt: Date? = nil,
         updatedAt: Date? = nil,
         timestamp: String,
@@ -49,7 +144,11 @@ struct SpaceMessage: Identifiable, Hashable {
         isEdited: Bool = false,
         editedAt: Date? = nil,
         replyContext: MessageReplyContext? = nil,
-        reactions: [MessageReaction] = []
+        linkPreview: LinkPreviewData? = nil,
+        spaceLinks: [SpaceLinkAttachment] = [],
+        reactions: [MessageReaction] = [],
+        localDeliveryState: LocalMessageDeliveryState? = nil,
+        localFailureMessage: String? = nil
     ) {
         self.id = id
         self.spaceId = spaceId
@@ -61,6 +160,7 @@ struct SpaceMessage: Identifiable, Hashable {
         self.deleted = deleted
         self.text = text
         self.media = media
+        self.mediaItems = mediaItems
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.timestamp = timestamp
@@ -70,7 +170,11 @@ struct SpaceMessage: Identifiable, Hashable {
         self.isEdited = isEdited
         self.editedAt = editedAt
         self.replyContext = replyContext
+        self.linkPreview = linkPreview
+        self.spaceLinks = spaceLinks
         self.reactions = reactions
+        self.localDeliveryState = localDeliveryState
+        self.localFailureMessage = localFailureMessage
     }
 
     init(
@@ -84,6 +188,7 @@ struct SpaceMessage: Identifiable, Hashable {
         deleted: Bool = false,
         text: String? = nil,
         media: SpaceMedia? = nil,
+        mediaItems: [SpaceMedia] = [],
         createdAt: Date? = nil,
         updatedAt: Date? = nil,
         timestamp: String,
@@ -93,7 +198,11 @@ struct SpaceMessage: Identifiable, Hashable {
         isEdited: Bool = false,
         editedAt: Date? = nil,
         replyContext: MessageReplyContext? = nil,
-        reactions: [MessageReaction] = []
+        linkPreview: LinkPreviewData? = nil,
+        spaceLinks: [SpaceLinkAttachment] = [],
+        reactions: [MessageReaction] = [],
+        localDeliveryState: LocalMessageDeliveryState? = nil,
+        localFailureMessage: String? = nil
     ) {
         self.init(
             id: id.uuidString,
@@ -106,6 +215,7 @@ struct SpaceMessage: Identifiable, Hashable {
             deleted: deleted,
             text: text,
             media: media,
+            mediaItems: mediaItems,
             createdAt: createdAt,
             updatedAt: updatedAt,
             timestamp: timestamp,
@@ -115,7 +225,29 @@ struct SpaceMessage: Identifiable, Hashable {
             isEdited: isEdited,
             editedAt: editedAt,
             replyContext: replyContext,
-            reactions: reactions
+            linkPreview: linkPreview,
+            spaceLinks: spaceLinks,
+            reactions: reactions,
+            localDeliveryState: localDeliveryState,
+            localFailureMessage: localFailureMessage
         )
+    }
+
+    var resolvedMediaItems: [SpaceMedia] {
+        if !mediaItems.isEmpty {
+            return mediaItems
+        }
+        if let media {
+            return [media]
+        }
+        return []
+    }
+
+    var primaryMedia: SpaceMedia? {
+        resolvedMediaItems.first
+    }
+
+    var hasMediaAttachments: Bool {
+        !resolvedMediaItems.isEmpty
     }
 }

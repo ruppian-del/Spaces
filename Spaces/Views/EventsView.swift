@@ -2,9 +2,12 @@ import SwiftUI
 
 struct EventsView: View {
     @StateObject private var viewModel: EventsViewModel
+    @State private var selectedLinkedEventID: String?
+    private let initialEventID: String?
 
-    init(space: Space) {
+    init(space: Space, initialEventID: String? = nil) {
         _viewModel = StateObject(wrappedValue: EventsViewModel(space: space))
+        self.initialEventID = initialEventID
     }
 
     var body: some View {
@@ -37,6 +40,16 @@ struct EventsView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .background(
+            NavigationLink(
+                destination: linkedEventDestination,
+                isActive: Binding(
+                    get: { selectedLinkedEventID != nil },
+                    set: { if !$0 { selectedLinkedEventID = nil } }
+                )
+            ) { EmptyView() }
+            .hidden()
+        )
         .navigationTitle("Events")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -71,6 +84,31 @@ struct EventsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(viewModel.errorMessage ?? "")
+        }
+        .onChange(of: viewModel.events) { events in
+            guard let initialEventID else { return }
+            if selectedLinkedEventID == nil, let event = events.first(where: { $0.id == initialEventID }) {
+                selectedLinkedEventID = event.id
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var linkedEventDestination: some View {
+        if let eventID = selectedLinkedEventID,
+           let event = viewModel.events.first(where: { $0.id == eventID }) {
+            EventDetailView(
+                space: viewModel.space,
+                event: event,
+                onEdit: { viewModel.presentEditEvent(event) },
+                onDelete: {
+                    Task {
+                        await viewModel.deleteEvent(event)
+                    }
+                }
+            )
+        } else {
+            EmptyView()
         }
     }
 

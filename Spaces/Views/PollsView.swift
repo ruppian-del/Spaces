@@ -3,9 +3,12 @@ import SwiftUI
 struct PollsView: View {
     @StateObject private var viewModel: PollsViewModel
     @State private var isPresentingCreatePoll = false
+    @State private var selectedLinkedPollID: String?
+    private let initialPollID: String?
 
-    init(space: Space) {
+    init(space: Space, initialPollID: String? = nil) {
         _viewModel = StateObject(wrappedValue: PollsViewModel(space: space))
+        self.initialPollID = initialPollID
     }
 
     var body: some View {
@@ -35,10 +38,26 @@ struct PollsView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .background(
+            NavigationLink(
+                destination: linkedPollDestination,
+                isActive: Binding(
+                    get: { selectedLinkedPollID != nil },
+                    set: { if !$0 { selectedLinkedPollID = nil } }
+                )
+            ) { EmptyView() }
+            .hidden()
+        )
         .navigationTitle("Polls")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             viewModel.startListeningIfNeeded()
+        }
+        .onChange(of: viewModel.polls) { polls in
+            guard let initialPollID else { return }
+            if selectedLinkedPollID == nil, let poll = polls.first(where: { $0.id == initialPollID }) {
+                selectedLinkedPollID = poll.id
+            }
         }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -74,6 +93,15 @@ struct PollsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(viewModel.errorMessage ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var linkedPollDestination: some View {
+        if let pollID = selectedLinkedPollID {
+            PollDetailView(viewModel: viewModel, pollID: pollID)
+        } else {
+            EmptyView()
         }
     }
 

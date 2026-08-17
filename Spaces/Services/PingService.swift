@@ -9,6 +9,7 @@ final class PingService {
     private let authService: AuthService
     private let userProfileService: UserProfileService
     private let encryptionService: EncryptionService
+    private let encryptedMediaService: EncryptedMediaService
     private let firestore: Firestore?
     private let generalEncryptionVersion = "aes-gcm-v1"
     private var verifiedPingEncryptionIDs: Set<String> = []
@@ -17,11 +18,17 @@ final class PingService {
         authService: AuthService? = nil,
         userProfileService: UserProfileService? = nil,
         encryptionService: EncryptionService = EncryptionService(),
+        encryptedMediaService: EncryptedMediaService? = nil,
         firestore: Firestore? = nil
     ) {
         self.authService = authService ?? AuthService()
         self.userProfileService = userProfileService ?? UserProfileService()
         self.encryptionService = encryptionService
+        self.encryptedMediaService = encryptedMediaService ?? EncryptedMediaService(
+            authService: authService,
+            encryptionService: encryptionService,
+            firestore: firestore
+        )
         self.firestore = firestore ?? FirebaseApp.app().map { _ in Firestore.firestore() }
     }
 
@@ -99,9 +106,19 @@ final class PingService {
                     do {
                         let pingKey = try await self.ensureEncryptionKey(pingID: ping.id)
                         try self.runMessageEncryptionSelfTestIfNeeded(pingID: ping.id, pingKey: pingKey)
-                        let messages = try snapshot?.documents.compactMap {
-                            try self.mapMessage(document: $0, currentUserID: session.uid, pingKey: pingKey)
-                        } ?? []
+                        var messages: [SpaceMessage] = []
+                        for document in snapshot?.documents ?? [] {
+                            let data = document.data()
+                            let type = data["type"] as? String ?? ""
+                            let mediaCategory = data["mediaCategory"] as? String ?? ""
+                            let mediaType = data["mediaType"] as? String ?? ""
+                            if type == "gif" || mediaCategory == "gif" || mediaType == "gif" {
+                                print("[GIF Receive] message document received id=\(document.documentID) type=\(type) mediaCategory=\(mediaCategory) mediaType=\(mediaType)")
+                            }
+                            if let message = try self.mapMessage(document: document, currentUserID: session.uid, pingKey: pingKey) {
+                                messages.append(message)
+                            }
+                        }
                         onUpdate(.success(messages))
                     } catch {
                         onUpdate(.failure(error))
@@ -370,6 +387,341 @@ final class PingService {
         )
     }
 
+    func sendImageMessage(
+        in ping: Ping,
+        imageData: Data,
+        caption: String?,
+        mediaCategory: String = "photo",
+        previewImageData: Data? = nil,
+        mimeType: String = "image/jpeg",
+        replyContext: MessageReplyContext? = nil
+    ) async throws -> SpaceMessage {
+        guard let firestore else {
+            throw PingServiceError.firestoreNotConfigured
+        }
+        guard let session = authService.currentSession() else {
+            throw PingServiceError.userNotSignedIn
+        }
+
+        let profile = try await userProfileService.fetchUserProfile(uid: session.uid)
+        let senderName = profile?.displayName ?? session.displayName
+        let senderEmoji = profile?.emojiAvatar.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "🧑‍💻"
+        let resolvedMediaType = MediaType(rawValue: mediaCategory) ?? .photo
+        let resolvedMessageType: MessageType = {
+            switch resolvedMediaType {
+            case .gif:
+                return .gif
+            case .meme:
+                return .meme
+            default:
+                return .image
+            }
+        }()
+
+        let pingKey = try await ensureEncryptionKey(pingID: ping.id)
+        try runMessageEncryptionSelfTestIfNeeded(pingID: ping.id, pingKey: pingKey)
+        let trimmedCaption = caption?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let encryptedCaption = try trimmedCaption.map {
+            try encryptionService.encryptText($0, using: pingKey)
+        }
+
+        let mediaID = firestore.collection("pings").document(ping.id).collection("messages").document().documentID
+        let messageReference = firestore.collection("pings")
+            .document(ping.id)
+            .collection("messages")
+            .document(mediaID)
+        let uploadResult: EncryptedMediaUploadResult
+        if resolvedMediaType == .gif || resolvedMediaType == .meme {
+            if resolvedMediaType == .gif {
+                print("[GIF] Preparing upload")
+                print("[GIF] Upload started")
+            }
+            uploadResult = try await encryptedMediaService.uploadAnimatedImage(
+                spaceID: "ping:\(ping.id)",
+                mediaID: mediaID,
+                originalData: imageData,
+                previewImageData: previewImageData ?? imageData,
+                mediaType: resolvedMediaType,
+                mimeType: mimeType,
+                uploadedBy: session.uid
+            )
+            if resolvedMediaType == .gif {
+                print("[GIF] Upload finished")
+            }
+        } else {
+            uploadResult = try await encryptedMediaService.uploadImage(
+                spaceID: "ping:\(ping.id)",
+                mediaID: mediaID,
+                originalData: imageData,
+                mediaType: resolvedMediaType,
+                mimeType: mimeType,
+                uploadedBy: session.uid
+            )
+        }
+        let metadata = uploadResult.metadata
+        print("[PingService][ImageMessage] mediaSelected=true imageDataByteCount=\(imageData.count) thumbnailByteCount=\(previewImageData?.count ?? imageData.count) mediaCategory=\(mediaCategory)")
+        print("[PingService][ImageMessage] uploadPath=\(metadata.storagePath)")
+        if let thumbnailStoragePath = metadata.thumbnailStoragePath {
+            print("[PingService][ImageMessage] uploadPath=\(thumbnailStoragePath)")
+        }
+
+        var messageData: [String: Any] = [
+            "id": mediaID,
+            "mediaId": metadata.mediaId,
+            "pingId": ping.id,
+            "senderId": session.uid,
+            "senderName": senderName,
+            "senderEmoji": senderEmoji,
+            "type": resolvedMessageType.rawValue,
+            "mediaCategory": mediaCategory,
+            "mediaType": metadata.mediaType.rawValue,
+            "storagePath": metadata.storagePath,
+            "nonce": metadata.nonce,
+            "mediaStoragePath": metadata.storagePath,
+            "mediaNonceBase64": metadata.nonce,
+            "encryptionVersion": metadata.encryptionVersion,
+            "mimeType": metadata.mimeType,
+            "fileSize": metadata.fileSize,
+            "uploadedBy": metadata.uploadedBy,
+            "deleted": false,
+            "createdAt": FieldValue.serverTimestamp(),
+            "updatedAt": FieldValue.serverTimestamp(),
+            "status": "sent"
+        ]
+        if let thumbnailStoragePath = metadata.thumbnailStoragePath {
+            messageData["thumbnailStoragePath"] = thumbnailStoragePath
+        }
+        if let thumbnailNonce = metadata.thumbnailNonce {
+            messageData["thumbnailNonce"] = thumbnailNonce
+            messageData["thumbnailNonceBase64"] = thumbnailNonce
+        }
+        if let width = metadata.width {
+            messageData["width"] = width
+        }
+        if let height = metadata.height {
+            messageData["height"] = height
+        }
+        if let encryptedCaption {
+            messageData["captionCiphertextBase64"] = encryptedCaption.ciphertext
+            messageData["captionNonceBase64"] = encryptedCaption.nonce
+        }
+        addReplyContext(replyContext, to: &messageData)
+        if resolvedMediaType == .gif {
+            print("[GIF] Firestore write starting")
+        }
+        do {
+            try await setData(messageData, for: messageReference)
+            if resolvedMediaType == .gif {
+                print("[GIF] Firestore write succeeded")
+            }
+        } catch {
+            if resolvedMediaType == .gif {
+                print("[GIF] Firestore write failed: \(error)")
+            }
+            throw error
+        }
+        print("[PingService][ImageMessage] messageDocumentCreated=true messageId=\(mediaID)")
+
+        if let recipientID = notificationRecipientID(for: ping, currentUserID: session.uid) {
+            try await recordPingNotification(
+                firestore: firestore,
+                recipientID: recipientID,
+                actorID: session.uid,
+                actorName: senderName,
+                actorEmoji: senderEmoji,
+                title: "\(senderName) sent you a Ping",
+                pingID: ping.id
+            )
+        }
+
+        try await updatePingMetadata(
+            pingID: ping.id,
+            at: Date(),
+            previewType: resolvedMessageType.rawValue
+        )
+
+        return SpaceMessage(
+            id: mediaID,
+            spaceId: "ping:\(ping.id)",
+            senderId: session.uid,
+            senderName: senderName,
+            senderEmoji: senderEmoji,
+            type: resolvedMessageType,
+            encryptionVersion: metadata.encryptionVersion,
+            deleted: false,
+            text: nil,
+            media: SpaceMedia(
+                id: mediaID,
+                spaceID: "ping:\(ping.id)",
+                type: resolvedMessageType == .gif ? .gif : .image,
+                mediaCategory: mediaCategory,
+                mediaType: metadata.mediaType,
+                placeholderImageName: metadata.mediaType.defaultPlaceholderImageName,
+                caption: trimmedCaption,
+                senderName: senderName,
+                timestamp: Self.messageTimestampFormatter.string(from: Date()),
+                metadata: metadata,
+                mediaStoragePath: metadata.storagePath,
+                thumbnailStoragePath: metadata.thumbnailStoragePath,
+                mediaNonceBase64: metadata.nonce,
+                thumbnailNonceBase64: metadata.thumbnailNonce
+            ),
+            createdAt: Date(),
+            updatedAt: Date(),
+            timestamp: Self.messageTimestampFormatter.string(from: Date()),
+            isOutgoing: true,
+            status: "sent",
+            deliveryStatus: "Sent",
+            isEdited: false,
+            replyContext: replyContext
+        )
+    }
+
+    func sendVideoMessage(
+        in ping: Ping,
+        videoData: Data,
+        caption: String?,
+        mimeType: String,
+        replyContext: MessageReplyContext? = nil
+    ) async throws -> SpaceMessage {
+        guard let firestore else {
+            throw PingServiceError.firestoreNotConfigured
+        }
+        guard let session = authService.currentSession() else {
+            throw PingServiceError.userNotSignedIn
+        }
+
+        let profile = try await userProfileService.fetchUserProfile(uid: session.uid)
+        let senderName = profile?.displayName ?? session.displayName
+        let senderEmoji = profile?.emojiAvatar.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "🧑‍💻"
+        let pingKey = try await ensureEncryptionKey(pingID: ping.id)
+        try runMessageEncryptionSelfTestIfNeeded(pingID: ping.id, pingKey: pingKey)
+        let trimmedCaption = caption?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let encryptedCaption = try trimmedCaption.map {
+            try encryptionService.encryptText($0, using: pingKey)
+        }
+
+        let mediaID = firestore.collection("pings").document(ping.id).collection("messages").document().documentID
+        let messageReference = firestore.collection("pings")
+            .document(ping.id)
+            .collection("messages")
+            .document(mediaID)
+        let uploadResult = try await encryptedMediaService.uploadVideo(
+            spaceID: "ping:\(ping.id)",
+            mediaID: mediaID,
+            originalData: videoData,
+            mimeType: mimeType,
+            uploadedBy: session.uid
+        )
+        let metadata = uploadResult.metadata
+        print("[PingService][VideoMessage] mediaSelected=true videoDataByteCount=\(videoData.count)")
+        print("[PingService][VideoMessage] uploadPath=\(metadata.storagePath)")
+        if let thumbnailStoragePath = metadata.thumbnailStoragePath {
+            print("[PingService][VideoMessage] uploadPath=\(thumbnailStoragePath)")
+        }
+
+        var messageData: [String: Any] = [
+            "id": mediaID,
+            "mediaId": metadata.mediaId,
+            "pingId": ping.id,
+            "senderId": session.uid,
+            "senderName": senderName,
+            "senderEmoji": senderEmoji,
+            "type": MessageType.video.rawValue,
+            "mediaCategory": "video",
+            "mediaType": metadata.mediaType.rawValue,
+            "storagePath": metadata.storagePath,
+            "nonce": metadata.nonce,
+            "mediaStoragePath": metadata.storagePath,
+            "mediaNonceBase64": metadata.nonce,
+            "encryptionVersion": metadata.encryptionVersion,
+            "mimeType": metadata.mimeType,
+            "fileSize": metadata.fileSize,
+            "uploadedBy": metadata.uploadedBy,
+            "deleted": false,
+            "createdAt": FieldValue.serverTimestamp(),
+            "updatedAt": FieldValue.serverTimestamp(),
+            "status": "sent"
+        ]
+        if let thumbnailStoragePath = metadata.thumbnailStoragePath {
+            messageData["thumbnailStoragePath"] = thumbnailStoragePath
+        }
+        if let thumbnailNonce = metadata.thumbnailNonce {
+            messageData["thumbnailNonce"] = thumbnailNonce
+            messageData["thumbnailNonceBase64"] = thumbnailNonce
+        }
+        if let width = metadata.width {
+            messageData["width"] = width
+        }
+        if let height = metadata.height {
+            messageData["height"] = height
+        }
+        if let duration = metadata.duration {
+            messageData["duration"] = duration
+        }
+        if let encryptedCaption {
+            messageData["captionCiphertextBase64"] = encryptedCaption.ciphertext
+            messageData["captionNonceBase64"] = encryptedCaption.nonce
+        }
+        addReplyContext(replyContext, to: &messageData)
+        try await setData(messageData, for: messageReference)
+        print("[PingService][VideoMessage] messageDocumentCreated=true messageId=\(mediaID)")
+
+        if let recipientID = notificationRecipientID(for: ping, currentUserID: session.uid) {
+            try await recordPingNotification(
+                firestore: firestore,
+                recipientID: recipientID,
+                actorID: session.uid,
+                actorName: senderName,
+                actorEmoji: senderEmoji,
+                title: "\(senderName) sent you a Ping",
+                pingID: ping.id
+            )
+        }
+
+        try await updatePingMetadata(
+            pingID: ping.id,
+            at: Date(),
+            previewType: MessageType.video.rawValue
+        )
+
+        return SpaceMessage(
+            id: mediaID,
+            spaceId: "ping:\(ping.id)",
+            senderId: session.uid,
+            senderName: senderName,
+            senderEmoji: senderEmoji,
+            type: .video,
+            encryptionVersion: metadata.encryptionVersion,
+            deleted: false,
+            text: nil,
+            media: SpaceMedia(
+                id: mediaID,
+                spaceID: "ping:\(ping.id)",
+                type: .video,
+                mediaCategory: "video",
+                mediaType: metadata.mediaType,
+                placeholderImageName: metadata.mediaType.defaultPlaceholderImageName,
+                caption: trimmedCaption,
+                senderName: senderName,
+                timestamp: Self.messageTimestampFormatter.string(from: Date()),
+                metadata: metadata,
+                mediaStoragePath: metadata.storagePath,
+                thumbnailStoragePath: metadata.thumbnailStoragePath,
+                mediaNonceBase64: metadata.nonce,
+                thumbnailNonceBase64: metadata.thumbnailNonce
+            ),
+            createdAt: Date(),
+            updatedAt: Date(),
+            timestamp: Self.messageTimestampFormatter.string(from: Date()),
+            isOutgoing: true,
+            status: "sent",
+            deliveryStatus: "Sent",
+            isEdited: false,
+            replyContext: replyContext
+        )
+    }
+
     func deleteMessage(in ping: Ping, messageID: String) async throws {
         guard let firestore else {
             throw PingServiceError.firestoreNotConfigured
@@ -537,14 +889,13 @@ final class PingService {
         let replyContext = mappedReplyContext(from: data)
         let encryptionVersion = inferredEncryptionVersion(from: data)
 
-        guard type == .text else { return nil }
         if deleted {
             return SpaceMessage(
                 id: data["id"] as? String ?? document.documentID,
                 senderId: senderID,
                 senderName: data["senderName"] as? String ?? "User",
                 senderEmoji: (data["senderEmoji"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                type: .text,
+                type: type,
                 encryptionVersion: encryptionVersion,
                 deleted: true,
                 text: nil,
@@ -561,6 +912,94 @@ final class PingService {
                 reactions: []
             )
         }
+
+        if [.image, .video, .meme, .gif, .screenshot].contains(type) {
+            let caption: String?
+            if let captionCiphertext = (data["captionCiphertextBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+               let captionNonce = (data["captionNonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+                do {
+                    caption = try encryptionService.decryptText(
+                        ciphertext: captionCiphertext,
+                        nonce: captionNonce,
+                        using: pingKey
+                    )
+                } catch {
+                    if type == .gif {
+                        print("[GIF Receive] caption decrypt failed id=\(document.documentID) error=\(error)")
+                    }
+                    caption = nil
+                }
+            } else {
+                caption = nil
+            }
+
+            let mediaCategory = (data["mediaCategory"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            let resolvedMediaType = (data["mediaType"] as? String)
+                .flatMap(MediaType.init(rawValue:))
+                ?? MediaType(rawValue: mediaCategory ?? "")
+                ?? (type == .video ? .video : (type == .meme ? .meme : (type == .gif ? .gif : .photo)))
+            let pingIdentifier = (data["pingId"] as? String) ?? document.reference.parent.parent?.documentID ?? ""
+            let metadata = EncryptedMediaMetadata(
+                mediaId: (data["mediaId"] as? String) ?? (data["id"] as? String ?? document.documentID),
+                mediaType: resolvedMediaType,
+                storagePath: (data["storagePath"] as? String) ?? (data["mediaStoragePath"] as? String) ?? "",
+                thumbnailStoragePath: (data["thumbnailStoragePath"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                encryptionVersion: encryptionVersion,
+                nonce: (data["nonce"] as? String) ?? (data["mediaNonceBase64"] as? String) ?? "",
+                thumbnailNonce: (data["thumbnailNonce"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? (data["thumbnailNonceBase64"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                mimeType: (data["mimeType"] as? String) ?? "image/jpeg",
+                fileSize: data["fileSize"] as? Int ?? 0,
+                width: data["width"] as? Int,
+                height: data["height"] as? Int,
+                duration: data["duration"] as? Double,
+                createdAt: createdAt,
+                uploadedBy: (data["uploadedBy"] as? String) ?? (senderID ?? "")
+            )
+            if type == .gif || mediaCategory == "gif" || resolvedMediaType == .gif {
+                print("[GIF Receive] message model mapped id=\(document.documentID) type=\(type.rawValue) mediaCategory=\(mediaCategory ?? "") mediaType=\(resolvedMediaType.rawValue) storagePath=\(metadata.storagePath) thumbnailStoragePath=\(metadata.thumbnailStoragePath ?? "")")
+            }
+
+            return SpaceMessage(
+                id: data["id"] as? String ?? document.documentID,
+                spaceId: pingIdentifier.isEmpty ? nil : "ping:\(pingIdentifier)",
+                senderId: senderID,
+                senderName: data["senderName"] as? String ?? "User",
+                senderEmoji: (data["senderEmoji"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                type: type,
+                encryptionVersion: encryptionVersion,
+                deleted: false,
+                text: nil,
+                media: SpaceMedia(
+                    id: data["id"] as? String ?? document.documentID,
+                    spaceID: pingIdentifier.isEmpty ? nil : "ping:\(pingIdentifier)",
+                    type: type,
+                    mediaCategory: mediaCategory,
+                    mediaType: resolvedMediaType,
+                    placeholderImageName: resolvedMediaType.defaultPlaceholderImageName,
+                    caption: caption,
+                    senderName: data["senderName"] as? String ?? "User",
+                    timestamp: Self.messageTimestampFormatter.string(from: createdAt ?? Date()),
+                    metadata: metadata,
+                    mediaStoragePath: metadata.storagePath,
+                    thumbnailStoragePath: metadata.thumbnailStoragePath,
+                    mediaNonceBase64: metadata.nonce,
+                    thumbnailNonceBase64: metadata.thumbnailNonce
+                ),
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                timestamp: Self.messageTimestampFormatter.string(from: createdAt ?? Date()),
+                isOutgoing: isOutgoing,
+                status: status,
+                deliveryStatus: deliveryStatus(for: status, isOutgoing: isOutgoing),
+                isEdited: isEdited,
+                editedAt: editedAt,
+                replyContext: replyContext,
+                reactions: []
+            )
+        }
+
+        guard type == .text else { return nil }
 
         let resolvedText: String
         switch encryptionVersion {

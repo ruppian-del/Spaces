@@ -1,27 +1,67 @@
 import SwiftUI
-import PhotosUI
+@preconcurrency import PhotosUI
 import UniformTypeIdentifiers
 import AVFoundation
 
 fileprivate enum GeneralAttachmentAction {
     case camera
+    case link
     case photos
-    case memes
-    case voice
-    case files
+    case gifs
+}
+
+fileprivate enum GeneralLinkedDestination: Hashable, Identifiable {
+    case polls(String)
+    case files(String)
+    case events(String)
+
+    var id: String {
+        switch self {
+        case .polls(let id): "polls:\(id)"
+        case .files(let id): "files:\(id)"
+        case .events(let id): "events:\(id)"
+        }
+    }
+}
+
+fileprivate struct GeneralMediaPickerConfiguration: Identifiable {
+    enum FilterKind {
+        case imagesOnly
+        case imagesAndVideos
+    }
+
+    let id: String
+    let filterKind: FilterKind
+    let mediaCategory: String
+    let allowsVideos: Bool
+    let selectionLimit: Int
+
+    static let photosAndVideos = GeneralMediaPickerConfiguration(
+        id: "photos-and-videos",
+        filterKind: .imagesAndVideos,
+        mediaCategory: "photo",
+        allowsVideos: true,
+        selectionLimit: 10
+    )
 }
 
 struct GeneralView: View {
     @StateObject private var viewModel: GeneralViewModel
     @FocusState private var isComposerFocused: Bool
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedMedia: SpaceMedia?
-    @State private var isPhotoPickerPresented = false
+    @State private var activeMediaPickerConfiguration: GeneralMediaPickerConfiguration?
+    @State private var isGiphyPickerPresented = false
     @State private var isAttachmentMenuPresented = false
     @State private var attachmentPlaceholderMessage: String?
     @State private var pendingAttachmentAction: GeneralAttachmentAction?
     @State private var pendingDeleteMessage: SpaceMessage?
     @State private var highlightedMessageID: String?
+    @State private var isSpaceLinkModulePickerPresented = false
+    @State private var activeSpaceLinkModule: SpaceLinkModuleDescriptor?
+    @State private var activeLinkedDestination: GeneralLinkedDestination?
     private let encryptedMediaService = EncryptedMediaService()
+    private let spaceLinkRegistry = SpaceLinkRegistry()
 
     init(space: Space) {
         _viewModel = StateObject(wrappedValue: GeneralViewModel(space: space))
@@ -61,6 +101,11 @@ struct GeneralView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 12)
             }
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    isComposerFocused = false
+                }
+            )
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Space Pings")
             .navigationBarTitleDisplayMode(.inline)
@@ -71,6 +116,15 @@ struct GeneralView: View {
             .task {
                 viewModel.startListeningIfNeeded()
                 scrollToBottom(proxy: proxy, animated: false)
+            }
+            .onDisappear {
+                viewModel.flushDraftPersistence()
+                viewModel.stopTypingIndicators()
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase == .background {
+                    viewModel.flushDraftPersistence()
+                }
             }
             .onChange(of: viewModel.messages) { _ in
                 if viewModel.isSearchPresented, let matchID = viewModel.currentSearchMatchMessageID() {
@@ -124,26 +178,96 @@ struct GeneralView: View {
                     }
                 }
             }
-            .sheet(isPresented: $isPhotoPickerPresented) {
-                LegacyMediaPicker { selection in
+            .sheet(item: $activeMediaPickerConfiguration) { configuration in
+                LegacyMediaPicker(configuration: configuration) { selections in
+                    if selections.isEmpty {
+                        viewModel.selectComposerMedia(
+                            data: nil,
+                            previewImageData: nil,
+                            mimeType: nil,
+                            mediaCategory: configuration.mediaCategory,
+                            isVideo: false
+                        )
+                    } else if selections.count == 1, let selection = selections.first {
+                        viewModel.selectComposerMedia(
+                            data: selection.data,
+                            previewImageData: selection.previewImageData,
+                            mimeType: selection.mimeType,
+                            mediaCategory: selection.mediaCategory,
+                            isVideo: selection.isVideo
+                        )
+                    } else {
+                        viewModel.selectComposerMediaItems(
+                            selections.map { selection in
+                                ComposerMediaSelection(
+                                    data: selection.data,
+                                    previewImageData: selection.previewImageData,
+                                    mimeType: selection.mimeType,
+                                    mediaCategory: selection.mediaCategory,
+                                    isVideo: selection.isVideo
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+            .sheet(isPresented: $isGiphyPickerPresented) {
+                GiphyPickerView { selection in
                     viewModel.selectComposerMedia(
                         data: selection?.data,
                         previewImageData: selection?.previewImageData,
                         mimeType: selection?.mimeType,
-                        mediaCategory: selection?.mediaCategory ?? viewModel.pendingMediaCategory,
+                        mediaCategory: selection?.mediaCategory ?? "gif",
                         isVideo: selection?.isVideo == true
                     )
                 }
             }
+            .sheet(isPresented: $isSpaceLinkModulePickerPresented) {
+                SpaceLinkModulePickerSheet(
+                    modules: spaceLinkRegistry.availableModules(in: viewModel.space),
+                    onSelect: { module in
+                        isSpaceLinkModulePickerPresented = false
+                        activeSpaceLinkModule = module
+                    }
+                )
+            }
+            .sheet(item: $activeSpaceLinkModule) { module in
+                SpaceLinkItemPickerSheet(
+                    space: viewModel.space,
+                    module: module,
+                    registry: spaceLinkRegistry,
+                    onSelect: { item in
+                        viewModel.addComposerSpaceLink(item.attachment)
+                        activeSpaceLinkModule = nil
+                        isComposerFocused = true
+                    },
+                    onError: { message in
+                        attachmentPlaceholderMessage = message
+                    }
+                )
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        viewModel.presentSearch()
+                    Menu {
+                        Button {
+                            viewModel.presentSearch()
+                        } label: {
+                            Label("Search", systemImage: "magnifyingglass")
+                        }
+
+                        if viewModel.hasSavedDraft {
+                            Button(role: .destructive) {
+                                viewModel.discardDraft()
+                            } label: {
+                                Label("Discard Draft", systemImage: "trash")
+                            }
+                        }
                     } label: {
-                        Image(systemName: "magnifyingglass")
+                        Image(systemName: "ellipsis.circle")
                     }
                 }
             }
+            .background(linkNavigationLinks)
         }
     }
 
@@ -183,6 +307,8 @@ struct GeneralView: View {
 
     private var composerBar: some View {
         VStack(alignment: .leading, spacing: 10) {
+            typingIndicatorRow
+
             if let editingMessage = viewModel.editingMessage {
                 editComposerPreview(for: editingMessage)
             }
@@ -191,47 +317,57 @@ struct GeneralView: View {
                 replyComposerPreview(for: replyingToMessage)
             }
 
-            if let image = viewModel.selectedComposerUIImage {
-                HStack(alignment: .top, spacing: 12) {
-                    ZStack {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 72, height: 72)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            if viewModel.isLoadingLinkPreview || viewModel.composerLinkPreview != nil {
+                composerLinkPreviewRow
+            }
 
-                        if viewModel.selectedComposerIsVideo {
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 28))
-                                .foregroundStyle(.white)
-                                .shadow(radius: 3)
+            if !viewModel.composerSpaceLinks.isEmpty {
+                composerSpaceLinksRow
+            }
+
+            if viewModel.hasSelectedComposerMedia {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(Array(zip(viewModel.selectedComposerMediaItems, viewModel.selectedComposerUIImages)), id: \.0.id) { item, image in
+                            ZStack(alignment: .topTrailing) {
+                                ZStack {
+                                    Image(uiImage: image)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 72, height: 72)
+                                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                                    if item.isVideo {
+                                        Image(systemName: "play.circle.fill")
+                                            .font(.system(size: 28))
+                                            .foregroundStyle(.white)
+                                            .shadow(radius: 3)
+                                    }
+                                }
+
+                                Button {
+                                    viewModel.removeComposerMedia(id: item.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.title3)
+                                        .foregroundStyle(.white, .black.opacity(0.35))
+                                        .padding(4)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
-                    }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(
-                            viewModel.selectedComposerIsVideo
-                                ? "Selected video"
-                                : "Selected photo"
-                        )
-                            .font(.subheadline.weight(.semibold))
-                        Text("Add an optional caption below.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(selectedComposerTitle)
+                                .font(.subheadline.weight(.semibold))
+                            Text(selectedComposerSubtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: 150, alignment: .leading)
                     }
-
-                    Spacer()
-
-                    Button {
-                        viewModel.removeComposerMedia()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 14)
                 }
-                .padding(.horizontal, 14)
             }
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -248,13 +384,16 @@ struct GeneralView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .disabled(viewModel.isSending || !viewModel.canUploadMedia)
+                .disabled(viewModel.isSending || (!viewModel.canUploadMedia && spaceLinkRegistry.availableModules(in: viewModel.space).isEmpty))
 
                 TextField(
                     viewModel.isEditing
                         ? "Edit message"
-                        : (viewModel.selectedComposerUIImage == nil ? "Message" : "Add a caption..."),
-                    text: $viewModel.composerText
+                        : (!viewModel.hasComposerAttachments ? "Message" : "Add a caption..."),
+                    text: Binding(
+                        get: { viewModel.composerText },
+                        set: { viewModel.composerTextDidChange($0) }
+                    )
                 )
                     .focused($isComposerFocused)
                     .textFieldStyle(.plain)
@@ -301,11 +440,76 @@ struct GeneralView: View {
         .padding(.bottom, 10)
     }
 
+    private var typingIndicatorRow: some View {
+        ZStack(alignment: .leading) {
+            if let typingIndicatorText = viewModel.typingIndicatorText {
+                Text(typingIndicatorText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
+        .animation(.easeInOut(duration: 0.18), value: viewModel.typingIndicatorText)
+    }
+
+    @ViewBuilder
+    private var composerLinkPreviewRow: some View {
+        if viewModel.isLoadingLinkPreview && viewModel.composerLinkPreview == nil {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading preview...")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+        } else if let preview = viewModel.composerLinkPreview {
+            HStack(alignment: .top, spacing: 10) {
+                if let imageData = preview.imageData, let image = UIImage(data: imageData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(preview.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    if let summary = preview.summary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+
+                    Text(preview.domain)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.secondarySystemBackground))
+            )
+            .padding(.horizontal, 14)
+        }
+    }
+
     @ViewBuilder
     private func messageRow(_ message: SpaceMessage, at index: Int, proxy: ScrollViewProxy) -> some View {
         MessageBubbleView(
             message: message,
             onTapMedia: handleTapMedia,
+            onTapSpaceLink: handleTapSpaceLink,
             onDelete: deleteAction(for: message),
             onReply: replyAction(for: message),
             onEdit: editAction(for: message),
@@ -313,12 +517,50 @@ struct GeneralView: View {
             onTapReplyPreview: tapReplyPreviewAction(for: message, proxy: proxy),
             onCopyText: copyTextAction(for: message),
             onSaveMedia: saveMediaAction(for: message),
+            onRetryFailedMessage: retryFailedMessageAction(for: message),
+            onDeleteFailedMessage: deleteFailedMessageAction(for: message),
             reactionOptions: viewModel.reactionOptions(for: message),
             onToggleReaction: toggleReactionAction(for: message),
             showsSenderName: shouldShowSenderName(for: message, at: index),
             isHighlighted: highlightedMessageID == message.id,
             searchQuery: viewModel.searchText
         )
+    }
+
+    private var composerSpaceLinksRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(viewModel.composerSpaceLinks) { link in
+                    HStack(spacing: 8) {
+                        Image(systemName: link.icon)
+                            .font(.caption.weight(.semibold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(link.title)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Text(link.subtitle?.nilIfEmpty ?? link.moduleType.title)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Button {
+                            viewModel.removeComposerSpaceLink(id: link.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color(.secondarySystemBackground))
+                    )
+                }
+            }
+            .padding(.horizontal, 14)
+        }
     }
 
     private func shouldShowSenderName(for message: SpaceMessage, at index: Int) -> Bool {
@@ -335,8 +577,8 @@ struct GeneralView: View {
 
         let current = visibleMessages[index]
         let next = visibleMessages[index + 1]
-        let currentIsMedia = current.media != nil
-        let nextIsMedia = next.media != nil
+        let currentIsMedia = current.hasMediaAttachments
+        let nextIsMedia = next.hasMediaAttachments
 
         let baseSpacing: CGFloat
         switch (currentIsMedia, nextIsMedia) {
@@ -365,6 +607,20 @@ struct GeneralView: View {
             return 18
         case (true, true):
             return 20
+        }
+    }
+
+    private func retryFailedMessageAction(for message: SpaceMessage) -> (() -> Void)? {
+        guard message.localDeliveryState == .failed else { return nil }
+        return {
+            viewModel.retryQueuedMessage(message.id)
+        }
+    }
+
+    private func deleteFailedMessageAction(for message: SpaceMessage) -> (() -> Void)? {
+        guard message.localDeliveryState == .failed else { return nil }
+        return {
+            viewModel.deleteQueuedMessage(message.id)
         }
     }
 
@@ -403,7 +659,7 @@ struct GeneralView: View {
     }
 
     private func saveMediaAction(for message: SpaceMessage) -> (() -> Void)? {
-        guard message.media != nil else { return nil }
+        guard message.hasMediaAttachments else { return nil }
         return {
             Task {
                 await saveMedia(from: message)
@@ -633,19 +889,28 @@ struct GeneralView: View {
         switch action {
         case .camera:
             attachmentPlaceholderMessage = "Camera capture will be added in a future update."
+        case .link:
+            isSpaceLinkModulePickerPresented = true
         case .photos:
-            isPhotoPickerPresented = true
-        case .memes:
-            attachmentPlaceholderMessage = "GIF and meme picking will be added in a separate media flow."
-        case .voice:
-            attachmentPlaceholderMessage = "Voice messages are not ready yet."
+            activeMediaPickerConfiguration = .photosAndVideos
+        case .gifs:
+            isGiphyPickerPresented = true
+        }
+    }
+
+    private func handleTapSpaceLink(_ link: SpaceLinkAttachment) {
+        switch link.moduleType {
+        case .polls:
+            activeLinkedDestination = .polls(link.targetId)
         case .files:
-            attachmentPlaceholderMessage = "File attachments are not ready yet."
+            activeLinkedDestination = .files(link.targetId)
+        case .events:
+            activeLinkedDestination = .events(link.targetId)
         }
     }
 
     private func saveMedia(from message: SpaceMessage) async {
-        guard let media = message.media else { return }
+        guard let media = message.primaryMedia else { return }
 
         do {
             if media.type == .video {
@@ -664,6 +929,87 @@ struct GeneralView: View {
             }
         } catch {
             attachmentPlaceholderMessage = error.localizedDescription
+        }
+    }
+
+    private var selectedComposerTitle: String {
+        let selectedCount = viewModel.selectedComposerMediaItems.count
+        if viewModel.selectedComposerIsVideo {
+            return "Selected video"
+        }
+        if selectedCount == 1 {
+            return "1 selected image"
+        }
+        return "\(selectedCount) selected images"
+    }
+
+    private var selectedComposerSubtitle: String {
+        return "Add an optional caption below."
+    }
+
+    private var linkNavigationLinks: some View {
+        Group {
+            NavigationLink(
+                destination: pollLinkedDestinationView,
+                isActive: pollDestinationBinding
+            ) { EmptyView() }
+            NavigationLink(
+                destination: filesLinkedDestinationView,
+                isActive: filesDestinationBinding
+            ) { EmptyView() }
+            NavigationLink(
+                destination: eventsLinkedDestinationView,
+                isActive: eventsDestinationBinding
+            ) { EmptyView() }
+        }
+        .hidden()
+    }
+
+    private var pollDestinationBinding: Binding<Bool> {
+        Binding(
+            get: { if case .polls = activeLinkedDestination { return true } else { return false } },
+            set: { if !$0 { activeLinkedDestination = nil } }
+        )
+    }
+
+    private var filesDestinationBinding: Binding<Bool> {
+        Binding(
+            get: { if case .files = activeLinkedDestination { return true } else { return false } },
+            set: { if !$0 { activeLinkedDestination = nil } }
+        )
+    }
+
+    private var eventsDestinationBinding: Binding<Bool> {
+        Binding(
+            get: { if case .events = activeLinkedDestination { return true } else { return false } },
+            set: { if !$0 { activeLinkedDestination = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private var pollLinkedDestinationView: some View {
+        if case .polls(let pollID) = activeLinkedDestination {
+            PollsView(space: viewModel.space, initialPollID: pollID)
+        } else {
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var filesLinkedDestinationView: some View {
+        if case .files(let fileID) = activeLinkedDestination {
+            FilesView(space: viewModel.space, initialFileID: fileID)
+        } else {
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var eventsLinkedDestinationView: some View {
+        if case .events(let eventID) = activeLinkedDestination {
+            EventsView(space: viewModel.space, initialEventID: eventID)
+        } else {
+            EmptyView()
         }
     }
 }
@@ -701,28 +1047,22 @@ private struct AttachmentMenuSheet: View {
                 action: .camera
             )
             attachmentRow(
+                title: "Link",
+                subtitle: "Reference something in this Space",
+                systemImage: "link",
+                action: .link
+            )
+            attachmentRow(
                 title: "Photos & Videos",
                 subtitle: "Choose from your library",
                 systemImage: "photo.on.rectangle",
                 action: .photos
             )
             attachmentRow(
-                title: "GIFs & Memes",
-                subtitle: "Search GIFs and memes",
-                systemImage: "face.smiling",
-                action: .memes
-            )
-            attachmentRow(
-                title: "Voice Message",
-                subtitle: "Record audio",
-                systemImage: "waveform",
-                action: .voice
-            )
-            attachmentRow(
-                title: "Files",
-                subtitle: "Browse documents",
-                systemImage: "doc",
-                action: .files
+                title: "GIFs",
+                subtitle: "Search and send a GIF",
+                systemImage: "sparkles.tv",
+                action: .gifs
             )
         }
         .listStyle(.insetGrouped)
@@ -759,6 +1099,108 @@ private struct AttachmentMenuSheet: View {
     }
 }
 
+private struct SpaceLinkModulePickerSheet: View {
+    let modules: [SpaceLinkModuleDescriptor]
+    let onSelect: (SpaceLinkModuleDescriptor) -> Void
+
+    var body: some View {
+        NavigationView {
+            List {
+                if modules.isEmpty {
+                    Text("No linkable modules are available in this Space yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(modules) { module in
+                        Button {
+                            onSelect(module)
+                        } label: {
+                            Label {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(module.title)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(.primary)
+                                    Text(module.subtitle)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            } icon: {
+                                Image(systemName: module.moduleType.icon)
+                                    .foregroundStyle(Color.accentColor)
+                                    .frame(width: 24)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .navigationTitle("Link")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .navigationViewStyle(.stack)
+    }
+}
+
+private struct SpaceLinkItemPickerSheet: View {
+    let space: Space
+    let module: SpaceLinkModuleDescriptor
+    let registry: SpaceLinkRegistry
+    let onSelect: (SpaceLinkRegistryItem) -> Void
+    let onError: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var items: [SpaceLinkRegistryItem] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        NavigationView {
+            List {
+                if isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else if items.isEmpty {
+                    Text("No items are available yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(items) { item in
+                        Button {
+                            dismiss()
+                            onSelect(item)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.title)
+                                    .foregroundStyle(.primary)
+                                if let subtitle = item.subtitle?.nilIfEmpty {
+                                    Text(subtitle)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .navigationTitle(module.title)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .navigationViewStyle(.stack)
+        .task {
+            do {
+                items = try await registry.fetchItems(for: module.moduleType, in: space)
+            } catch {
+                onError(error.localizedDescription)
+            }
+            isLoading = false
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
 private struct PickedComposerMedia {
     let data: Data
     let previewImageData: Data
@@ -768,17 +1210,26 @@ private struct PickedComposerMedia {
 }
 
 private struct LegacyMediaPicker: UIViewControllerRepresentable {
-    let onMediaPicked: (PickedComposerMedia?) -> Void
+    let configuration: GeneralMediaPickerConfiguration
+    let onMediaPicked: ([PickedComposerMedia]) -> Void
     @Environment(\.dismiss) private var dismiss
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onMediaPicked: onMediaPicked, dismiss: dismiss.callAsFunction)
+        Coordinator(configuration: configuration, onMediaPicked: onMediaPicked, dismiss: dismiss.callAsFunction)
     }
 
     func makeUIViewController(context: Context) -> PHPickerViewController {
         var configuration = PHPickerConfiguration(photoLibrary: .shared())
-        configuration.filter = .any(of: [.images, .videos])
-        configuration.selectionLimit = 1
+        switch self.configuration.filterKind {
+        case .imagesOnly:
+            configuration.filter = .images
+        case .imagesAndVideos:
+            configuration.filter = .any(of: [.images, .videos])
+        }
+        configuration.selectionLimit = self.configuration.selectionLimit
+        if #available(iOS 15.0, *) {
+            configuration.selection = .ordered
+        }
         let controller = PHPickerViewController(configuration: configuration)
         controller.delegate = context.coordinator
         return controller
@@ -787,69 +1238,107 @@ private struct LegacyMediaPicker: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
 
     final class Coordinator: NSObject, PHPickerViewControllerDelegate {
-        private let onMediaPicked: (PickedComposerMedia?) -> Void
+        private let configuration: GeneralMediaPickerConfiguration
+        private let onMediaPicked: ([PickedComposerMedia]) -> Void
         private let dismiss: () -> Void
 
-        init(onMediaPicked: @escaping (PickedComposerMedia?) -> Void, dismiss: @escaping () -> Void) {
+        init(
+            configuration: GeneralMediaPickerConfiguration,
+            onMediaPicked: @escaping ([PickedComposerMedia]) -> Void,
+            dismiss: @escaping () -> Void
+        ) {
+            self.configuration = configuration
             self.onMediaPicked = onMediaPicked
             self.dismiss = dismiss
         }
 
         func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-            guard let result = results.first else {
+            guard !results.isEmpty else {
                 dismiss()
-                onMediaPicked(nil)
+                onMediaPicked([])
                 return
             }
 
-            if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-                result.itemProvider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-                    DispatchQueue.main.async {
-                        self.dismiss()
-                        guard let data else {
-                            self.onMediaPicked(nil)
-                            return
-                        }
-                        self.onMediaPicked(
-                            PickedComposerMedia(
-                                data: data,
-                                previewImageData: data,
-                                mimeType: Self.mimeType(for: result.itemProvider, fallback: .image),
-                                mediaCategory: "photo",
-                                isVideo: false
-                            )
-                        )
+            let containsVideo = results.contains { $0.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) }
+            if containsVideo && results.count > 1 {
+                dismiss()
+                onMediaPicked([])
+                return
+            }
+
+            Task {
+                let selections = await self.loadSelections(from: results)
+                await MainActor.run {
+                    self.dismiss()
+                    self.onMediaPicked(selections)
+                }
+            }
+        }
+
+        private func loadSelections(from results: [PHPickerResult]) async -> [PickedComposerMedia] {
+            var selections: [PickedComposerMedia] = []
+
+            for result in results.prefix(configuration.selectionLimit) {
+                if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                    if let selection = await Self.loadImageSelection(from: result, mediaCategory: configuration.mediaCategory) {
+                        selections.append(selection)
+                    }
+                } else if configuration.allowsVideos && result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                    if let selection = await Self.loadVideoSelection(from: result) {
+                        selections.append(selection)
                     }
                 }
-            } else if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+            }
+
+            return selections
+        }
+
+        private static func loadImageSelection(from result: PHPickerResult, mediaCategory: String) async -> PickedComposerMedia? {
+            await withCheckedContinuation { continuation in
+                result.itemProvider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    guard let data else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let mimeType = Self.mimeType(for: result.itemProvider, fallback: .image)
+                    guard !Self.isAnimatedGIF(mimeType: mimeType) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(
+                        returning: PickedComposerMedia(
+                            data: data,
+                            previewImageData: data,
+                            mimeType: mimeType,
+                            mediaCategory: mediaCategory,
+                            isVideo: false
+                        )
+                    )
+                }
+            }
+        }
+
+        private static func loadVideoSelection(from result: PHPickerResult) async -> PickedComposerMedia? {
+            await withCheckedContinuation { continuation in
                 result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
                     guard
                         let url,
                         let data = try? Data(contentsOf: url),
                         let previewImageData = Self.videoPreviewImageData(for: url)
                     else {
-                        DispatchQueue.main.async {
-                            self.dismiss()
-                            self.onMediaPicked(nil)
-                        }
+                        continuation.resume(returning: nil)
                         return
                     }
-                    DispatchQueue.main.async {
-                        self.dismiss()
-                        self.onMediaPicked(
-                            PickedComposerMedia(
-                                data: data,
-                                previewImageData: previewImageData,
-                                mimeType: Self.mimeType(for: result.itemProvider, fallback: .movie),
-                                mediaCategory: "video",
-                                isVideo: true
-                            )
+                    continuation.resume(
+                        returning: PickedComposerMedia(
+                            data: data,
+                            previewImageData: previewImageData,
+                            mimeType: Self.mimeType(for: result.itemProvider, fallback: .movie),
+                            mediaCategory: "video",
+                            isVideo: true
                         )
-                    }
+                    )
                 }
-            } else {
-                dismiss()
-                onMediaPicked(nil)
             }
         }
 
@@ -871,6 +1360,10 @@ private struct LegacyMediaPicker: UIViewControllerRepresentable {
                 }
             }
             return fallback.preferredMIMEType ?? (fallback == .movie ? "video/quicktime" : "image/jpeg")
+        }
+
+        private static func isAnimatedGIF(mimeType: String) -> Bool {
+            mimeType.caseInsensitiveCompare("image/gif") == .orderedSame
         }
     }
 }

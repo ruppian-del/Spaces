@@ -1,8 +1,12 @@
+import AVFoundation
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PhotosView: View {
     @StateObject private var viewModel: PhotosViewModel
     @State private var selectedMedia: SpaceMedia?
+    @State private var isShowingMediaPicker = false
 
     private let columns = [
         GridItem(.flexible(), spacing: 12),
@@ -23,17 +27,25 @@ struct PhotosView: View {
                 emptyState
                     .padding(20)
             } else {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(viewModel.mediaItems) { media in
-                        Button {
-                            selectedMedia = media
-                        } label: {
-                            mediaTile(media)
+                GeometryReader { proxy in
+                    let contentWidth = max(proxy.size.width - 32, 0)
+                    let cellWidth = max((contentWidth - 12) / 2, 0)
+
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(viewModel.mediaItems) { media in
+                            Button {
+                                selectedMedia = media
+                            } label: {
+                                mediaTile(media)
+                                    .frame(width: cellWidth, alignment: .topLeading)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
+                    .frame(width: contentWidth, alignment: .topLeading)
+                    .padding(.horizontal, 16)
                 }
-                .padding(16)
+                .frame(height: photosGridHeight(for: viewModel.mediaItems.count))
             }
         }
         .background(Color(.systemGroupedBackground))
@@ -45,20 +57,44 @@ struct PhotosView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
+                    isShowingMediaPicker = true
                 } label: {
                     Image(systemName: "plus")
+                }
+                .disabled(!viewModel.canUploadMedia)
+            }
+        }
+        .sheet(isPresented: $isShowingMediaPicker) {
+            PhotosModuleMediaPicker { pickedMedia in
+                guard let pickedMedia else { return }
+                Task {
+                    await viewModel.uploadMedia(
+                        data: pickedMedia.data,
+                        mimeType: pickedMedia.mimeType,
+                        isVideo: pickedMedia.isVideo
+                    )
                 }
             }
         }
         .fullScreenCover(item: $selectedMedia) { media in
             MediaViewerPlaceholderView(space: viewModel.space, media: media)
         }
+        .alert("Photos", isPresented: Binding(
+            get: { viewModel.errorMessage != nil },
+            set: { if !$0 { viewModel.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
     }
 
     private func mediaTile(_ media: SpaceMedia) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             PhotosThumbnailView(media: media, tintHex: viewModel.space.tintHex)
+                .frame(maxWidth: .infinity)
                 .frame(height: 156)
+                .clipped()
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(media.senderName)
@@ -77,12 +113,24 @@ struct PhotosView: View {
                         .lineLimit(2)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(Color(.secondarySystemBackground))
         )
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private func photosGridHeight(for itemCount: Int) -> CGFloat {
+        let rows = max(Int(ceil(Double(itemCount) / 2.0)), 0)
+        guard rows > 0 else { return 0 }
+        let tileHeight: CGFloat = 252
+        let rowSpacing: CGFloat = 12
+        return CGFloat(rows) * tileHeight + CGFloat(max(rows - 1, 0)) * rowSpacing
     }
 
     private var emptyState: some View {
@@ -108,6 +156,103 @@ struct PhotosView: View {
     }
 }
 
+private struct PickedPhotosModuleMedia {
+    let data: Data
+    let mimeType: String
+    let isVideo: Bool
+}
+
+private struct PhotosModuleMediaPicker: UIViewControllerRepresentable {
+    let onMediaPicked: (PickedPhotosModuleMedia?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onMediaPicked: onMediaPicked, dismiss: dismiss.callAsFunction)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        configuration.filter = .any(of: [.images, .videos])
+        configuration.selectionLimit = 1
+
+        let controller = PHPickerViewController(configuration: configuration)
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        private let onMediaPicked: (PickedPhotosModuleMedia?) -> Void
+        private let dismiss: () -> Void
+
+        init(onMediaPicked: @escaping (PickedPhotosModuleMedia?) -> Void, dismiss: @escaping () -> Void) {
+            self.onMediaPicked = onMediaPicked
+            self.dismiss = dismiss
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            guard let result = results.first else {
+                dismiss()
+                onMediaPicked(nil)
+                return
+            }
+
+            if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                result.itemProvider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    DispatchQueue.main.async {
+                        self.dismiss()
+                        guard let data else {
+                            self.onMediaPicked(nil)
+                            return
+                        }
+                        self.onMediaPicked(
+                            PickedPhotosModuleMedia(
+                                data: data,
+                                mimeType: Self.mimeType(for: result.itemProvider, fallback: .image),
+                                isVideo: false
+                            )
+                        )
+                    }
+                }
+            } else if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
+                    guard let url, let data = try? Data(contentsOf: url) else {
+                        DispatchQueue.main.async {
+                            self.dismiss()
+                            self.onMediaPicked(nil)
+                        }
+                        return
+                    }
+
+                    DispatchQueue.main.async {
+                        self.dismiss()
+                        self.onMediaPicked(
+                            PickedPhotosModuleMedia(
+                                data: data,
+                                mimeType: Self.mimeType(for: result.itemProvider, fallback: .movie),
+                                isVideo: true
+                            )
+                        )
+                    }
+                }
+            } else {
+                dismiss()
+                onMediaPicked(nil)
+            }
+        }
+
+        private static func mimeType(for provider: NSItemProvider, fallback: UTType) -> String {
+            for identifier in provider.registeredTypeIdentifiers {
+                if let type = UTType(identifier), let mimeType = type.preferredMIMEType {
+                    return mimeType
+                }
+            }
+            return fallback.preferredMIMEType ?? "application/octet-stream"
+        }
+    }
+}
+
 private struct PhotosThumbnailView: View {
     let media: SpaceMedia
     let tintHex: String
@@ -125,6 +270,8 @@ private struct PhotosThumbnailView: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             } else if isLoading {
                 ProgressView()
                     .tint(Color(hex: tintHex))
@@ -134,7 +281,9 @@ private struct PhotosThumbnailView: View {
                     .foregroundStyle(Color(hex: tintHex))
             }
         }
+        .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .task(id: media.id) {
             guard image == nil else { return }
             do {

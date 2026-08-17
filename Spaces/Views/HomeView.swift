@@ -8,6 +8,7 @@ struct HomeView: View {
     @State private var isShowingJoinSpace = false
     @State private var isShowingNotifications = false
     @State private var isShowingGlobalSearch = false
+    @State private var isShowingCustomizeSpaces = false
     @State private var activeAlert: HomeFeedbackAlert?
     @State private var joinSpaceInlineMessage: HomeFeedbackAlert?
 
@@ -32,7 +33,10 @@ struct HomeView: View {
                     LazyVGrid(columns: columns, spacing: 16) {
                         ForEach(viewModel.spaces) { space in
                             NavigationLink(destination: SpaceDetailView(space: space)) {
-                                SpaceCardView(space: space)
+                                SpaceCardView(
+                                    space: space,
+                                    draftPreview: viewModel.draftPreviews[space.id]
+                                )
                             }
                             .buttonStyle(.plain)
                         }
@@ -65,13 +69,23 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        isShowingGlobalSearch = true
-                    } label: {
-                        Image(systemName: "magnifyingglass")
-                            .font(.headline)
+                    HStack(spacing: 16) {
+                        Button {
+                            isShowingGlobalSearch = true
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.headline)
+                        }
+                        .accessibilityLabel("Search")
+
+                        Button {
+                            isShowingCustomizeSpaces = true
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down.circle")
+                                .font(.headline)
+                        }
+                        .accessibilityLabel("Reorder Spaces")
                     }
-                    .accessibilityLabel("Search")
                 }
 
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -137,8 +151,14 @@ struct HomeView: View {
             .sheet(isPresented: $isShowingGlobalSearch) {
                 GlobalSearchView(spaces: viewModel.spaces)
             }
+            .sheet(isPresented: $isShowingCustomizeSpaces) {
+                SpaceOrderSheet(viewModel: viewModel)
+            }
             .task {
                 viewModel.startListeningIfNeeded()
+            }
+            .onAppear {
+                viewModel.refreshDraftPreviews()
             }
             .task {
                 notificationsViewModel.startListeningIfNeeded()
@@ -189,6 +209,49 @@ struct HomeView: View {
                     activeAlert = nil
                 }
             )
+        }
+    }
+}
+
+private struct SpaceOrderSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var viewModel: HomeViewModel
+    @State private var editMode: EditMode = .active
+
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(viewModel.spaces) { space in
+                    HStack(spacing: 12) {
+                        Text(space.emoji)
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(space.name)
+                                .font(.headline)
+                            Text(space.subtitle)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .onMove { indices, newOffset in
+                    Task {
+                        await viewModel.moveSpaces(fromOffsets: indices, toOffset: newOffset)
+                    }
+                }
+            }
+            .environment(\.editMode, $editMode)
+            .navigationTitle("Reorder Spaces")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }

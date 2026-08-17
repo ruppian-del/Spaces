@@ -1,5 +1,6 @@
 import FirebaseCore
 import FirebaseAuth
+import GiphyUISDK
 import SwiftUI
 
 @main
@@ -10,6 +11,7 @@ struct SpacesApp: App {
 
     init() {
         FirebaseBootstrap.configureIfNeeded()
+        GiphyBootstrap.configureIfNeeded()
     }
 
     var body: some Scene {
@@ -73,5 +75,19 @@ private enum FirebaseBootstrap {
         }
 
         FirebaseApp.configure(options: options)
+    }
+}
+
+private enum GiphyBootstrap {
+    static func configureIfNeeded(bundle: Bundle = .main) {
+        guard
+            let apiKey = (bundle.object(forInfoDictionaryKey: "GIPHYAPIKey") as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !apiKey.isEmpty
+        else {
+            return
+        }
+
+        Giphy.configure(apiKey: apiKey)
     }
 }

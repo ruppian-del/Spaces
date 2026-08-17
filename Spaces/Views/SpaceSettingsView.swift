@@ -5,6 +5,7 @@ struct SpaceSettingsView: View {
     @StateObject private var viewModel: SpaceSettingsViewModel
     @FocusState private var isEmojiFieldFocused: Bool
     @State private var activeErrorMessage: String?
+    @State private var isShowingModuleOrderSheet = false
 
     init(space: Space) {
         _viewModel = StateObject(wrappedValue: SpaceSettingsViewModel(space: space))
@@ -178,6 +179,9 @@ struct SpaceSettingsView: View {
                 }
             }
         }
+        .sheet(isPresented: $isShowingModuleOrderSheet) {
+            ModuleOrderSheet(viewModel: viewModel)
+        }
         .onChange(of: viewModel.errorMessage) { message in
             activeErrorMessage = message
         }
@@ -206,6 +210,10 @@ struct SpaceSettingsView: View {
     private var moduleSettingsSection: some View {
         Section {
             if viewModel.canManageModules {
+                Button("Reorder Modules") {
+                    isShowingModuleOrderSheet = true
+                }
+
                 Toggle("Events", isOn: eventsEnabledBinding)
                     .disabled(viewModel.isUpdatingEventsModule)
 
@@ -278,6 +286,49 @@ struct SpaceSettingsView: View {
 
     private var moduleSettingsFooterText: String {
         [eventsFooterText, filesFooterText, pollsFooterText].joined(separator: "\n\n")
+    }
+}
+
+private struct ModuleOrderSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var viewModel: SpaceSettingsViewModel
+    @State private var editMode: EditMode = .active
+
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(viewModel.moduleOrder) { module in
+                    HStack(spacing: 12) {
+                        Text(module.emoji)
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(module.title)
+                                .font(.headline)
+                            Text(module.description)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .onMove { indices, newOffset in
+                    Task {
+                        await viewModel.moveModule(fromOffsets: indices, toOffset: newOffset)
+                    }
+                }
+            }
+            .environment(\.editMode, $editMode)
+            .navigationTitle("Reorder Modules")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }
 

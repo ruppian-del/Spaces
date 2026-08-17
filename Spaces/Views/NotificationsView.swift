@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NotificationsView: View {
     @ObservedObject var viewModel: NotificationsViewModel
+    @State private var showingMarkAllReadConfirmation = false
 
     var body: some View {
         NavigationView {
@@ -36,6 +37,16 @@ struct NotificationsView: View {
             .listStyle(.insetGrouped)
             .navigationTitle("Notifications")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if viewModel.unreadCount > 0 {
+                        Button(viewModel.isMarkingAllRead ? "Reading..." : "Read All") {
+                            showingMarkAllReadConfirmation = true
+                        }
+                        .disabled(viewModel.isMarkingAllRead)
+                    }
+                }
+            }
             .task {
                 viewModel.startListeningIfNeeded()
             }
@@ -45,6 +56,20 @@ struct NotificationsView: View {
                     message: Text(error.message),
                     dismissButton: .cancel()
                 )
+            }
+            .confirmationDialog(
+                "Mark all notifications as read?",
+                isPresented: $showingMarkAllReadConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Read All") {
+                    Task {
+                        await viewModel.markAllRead()
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This keeps your notifications, but clears their unread state.")
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())

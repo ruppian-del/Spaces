@@ -5,9 +5,12 @@ struct FilesView: View {
     @StateObject private var viewModel: FilesViewModel
     @State private var isImporterPresented = false
     @State private var renameDraft = ""
+    @State private var hasOpenedInitialFile = false
+    private let initialFileID: String?
 
-    init(space: Space) {
+    init(space: Space, initialFileID: String? = nil) {
         _viewModel = StateObject(wrappedValue: FilesViewModel(space: space))
+        self.initialFileID = initialFileID
     }
 
     var body: some View {
@@ -33,72 +36,7 @@ struct FilesView: View {
                 if !viewModel.files.isEmpty {
                     Section("Files") {
                         ForEach(viewModel.files) { file in
-                            FileRow(file: file, tintHex: viewModel.space.tintHex)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    Task {
-                                        await viewModel.open(file)
-                                    }
-                                }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button {
-                                        Task {
-                                            await viewModel.share(file)
-                                        }
-                                    } label: {
-                                        Label("Share", systemImage: "square.and.arrow.up")
-                                    }
-                                    .tint(.blue)
-
-                                    Button {
-                                        Task {
-                                            await viewModel.prepareDownload(file)
-                                        }
-                                    } label: {
-                                        Label("Download", systemImage: "arrow.down.circle")
-                                    }
-                                    .tint(.teal)
-                                }
-                                .contextMenu {
-                                    Button {
-                                        Task {
-                                            await viewModel.open(file)
-                                        }
-                                    } label: {
-                                        Label("Open", systemImage: "arrow.up.forward.app")
-                                    }
-
-                                    Button {
-                                        Task {
-                                            await viewModel.prepareDownload(file)
-                                        }
-                                    } label: {
-                                        Label("Download", systemImage: "arrow.down.circle")
-                                    }
-
-                                    Button {
-                                        Task {
-                                            await viewModel.share(file)
-                                        }
-                                    } label: {
-                                        Label("Share", systemImage: "square.and.arrow.up")
-                                    }
-
-                                    if viewModel.canManage(file) {
-                                        Button {
-                                            renameDraft = file.name
-                                            viewModel.renameTargetFile = file
-                                        } label: {
-                                            Label("Rename", systemImage: "pencil")
-                                        }
-
-                                        Button(role: .destructive) {
-                                            viewModel.pendingDeleteFile = file
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                                }
+                            fileRow(for: file)
                         }
                     }
                 }
@@ -111,6 +49,7 @@ struct FilesView: View {
         .task {
             viewModel.startListeningIfNeeded()
         }
+        .onChange(of: viewModel.files, perform: handleInitialFileSelection)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
@@ -149,10 +88,7 @@ struct FilesView: View {
             }
         }
         .fileExporter(
-            isPresented: Binding(
-                get: { viewModel.exportPayload != nil },
-                set: { if !$0 { viewModel.clearExportPayload() } }
-            ),
+            isPresented: exportBinding,
             document: viewModel.exportPayload?.document,
             contentType: viewModel.exportPayload?.contentType ?? .data,
             defaultFilename: viewModel.exportPayload?.defaultFilename ?? "Spaces File"
@@ -193,18 +129,12 @@ struct FilesView: View {
         )) { item in
             ShareSheet(items: [item.url])
         }
-        .alert("Files", isPresented: Binding(
-            get: { viewModel.errorMessage != nil },
-            set: { if !$0 { viewModel.errorMessage = nil } }
-        )) {
+        .alert("Files", isPresented: errorAlertBinding) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(viewModel.errorMessage ?? "")
         }
-        .alert("Rename File", isPresented: Binding(
-            get: { viewModel.renameTargetFile != nil },
-            set: { if !$0 { viewModel.renameTargetFile = nil } }
-        )) {
+        .alert("Rename File", isPresented: renameAlertBinding) {
             TextField("File name", text: $renameDraft)
             Button("Cancel", role: .cancel) {
                 viewModel.renameTargetFile = nil
@@ -218,10 +148,7 @@ struct FilesView: View {
         } message: {
             Text("Update the file name without changing the encrypted file itself.")
         }
-        .alert("Delete this file?", isPresented: Binding(
-            get: { viewModel.pendingDeleteFile != nil },
-            set: { if !$0 { viewModel.pendingDeleteFile = nil } }
-        )) {
+        .alert("Delete this file?", isPresented: deleteAlertBinding) {
             Button("Cancel", role: .cancel) {
                 viewModel.pendingDeleteFile = nil
             }
@@ -255,6 +182,140 @@ struct FilesView: View {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(Color(.secondarySystemBackground))
         )
+    }
+
+    private var errorAlertBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.errorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.errorMessage = nil
+                }
+            }
+        )
+    }
+
+    private var renameAlertBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.renameTargetFile != nil },
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.renameTargetFile = nil
+                }
+            }
+        )
+    }
+
+    private var deleteAlertBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.pendingDeleteFile != nil },
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.pendingDeleteFile = nil
+                }
+            }
+        )
+    }
+
+    private var exportBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.exportPayload != nil },
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.clearExportPayload()
+                }
+            }
+        )
+    }
+
+    private func handleInitialFileSelection(_ files: [SpaceFileItem]) {
+        guard let initialFileID else { return }
+        guard !hasOpenedInitialFile else { return }
+        guard let file = files.first(where: { $0.id == initialFileID }) else { return }
+        hasOpenedInitialFile = true
+        Task {
+            await viewModel.open(file)
+        }
+    }
+
+    @ViewBuilder
+    private func fileRow(for file: SpaceFileItem) -> some View {
+        FileRow(file: file, tintHex: viewModel.space.tintHex)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                Task {
+                    await viewModel.open(file)
+                }
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                fileSwipeActions(for: file)
+            }
+            .contextMenu {
+                fileContextMenu(for: file)
+            }
+    }
+
+    @ViewBuilder
+    private func fileSwipeActions(for file: SpaceFileItem) -> some View {
+        Button {
+            Task {
+                await viewModel.share(file)
+            }
+        } label: {
+            Label("Share", systemImage: "square.and.arrow.up")
+        }
+        .tint(.blue)
+
+        Button {
+            Task {
+                await viewModel.prepareDownload(file)
+            }
+        } label: {
+            Label("Download", systemImage: "arrow.down.circle")
+        }
+        .tint(.teal)
+    }
+
+    @ViewBuilder
+    private func fileContextMenu(for file: SpaceFileItem) -> some View {
+        Button {
+            Task {
+                await viewModel.open(file)
+            }
+        } label: {
+            Label("Open", systemImage: "arrow.up.forward.app")
+        }
+
+        Button {
+            Task {
+                await viewModel.prepareDownload(file)
+            }
+        } label: {
+            Label("Download", systemImage: "arrow.down.circle")
+        }
+
+        Button {
+            Task {
+                await viewModel.share(file)
+            }
+        } label: {
+            Label("Share", systemImage: "square.and.arrow.up")
+        }
+
+        if viewModel.canManage(file) {
+            Button {
+                renameDraft = file.name
+                viewModel.renameTargetFile = file
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+
+            Button(role: .destructive) {
+                viewModel.pendingDeleteFile = file
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
     }
 }
 

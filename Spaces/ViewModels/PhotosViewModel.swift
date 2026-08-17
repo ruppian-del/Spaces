@@ -6,6 +6,7 @@ import Foundation
 final class PhotosViewModel: ObservableObject {
     @Published private(set) var mediaItems: [SpaceMedia]
     @Published private(set) var isLoading = false
+    @Published private(set) var canUploadMedia = false
     @Published var errorMessage: String?
 
     let space: Space
@@ -25,19 +26,24 @@ final class PhotosViewModel: ObservableObject {
     func startListeningIfNeeded() {
         guard listener == nil else { return }
         isLoading = true
+        Task {
+            canUploadMedia = await spaceService.canPerform(.uploadPhotosVideos, in: space)
+        }
         listener = spaceService.listenToMessages(in: space) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let messages):
-                self.mediaItems = messages.compactMap { message in
-                    guard
-                        message.type == .image,
-                        let media = message.media,
-                        media.mediaCategory == "photo"
-                    else {
-                        return nil
+                self.mediaItems = messages.flatMap { message in
+                    message.resolvedMediaItems.compactMap { media in
+                        switch media.mediaType {
+                        case .photo:
+                            return media.mediaCategory == "photo" ? media : nil
+                        case .video:
+                            return media
+                        default:
+                            return nil
+                        }
                     }
-                    return media
                 }
                 self.isLoading = false
                 self.errorMessage = nil
@@ -46,6 +52,29 @@ final class PhotosViewModel: ObservableObject {
                 self.isLoading = false
                 self.errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    func uploadMedia(data: Data, mimeType: String, isVideo: Bool) async {
+        guard canUploadMedia else { return }
+        do {
+            if isVideo {
+                _ = try await spaceService.sendVideoMessage(
+                    in: space,
+                    videoData: data,
+                    caption: nil,
+                    mimeType: mimeType
+                )
+            } else {
+                _ = try await spaceService.sendImageMessage(
+                    in: space,
+                    imageData: data,
+                    caption: nil,
+                    mediaCategory: "photo"
+                )
+            }
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 }

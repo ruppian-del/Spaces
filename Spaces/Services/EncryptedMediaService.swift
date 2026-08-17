@@ -4,6 +4,8 @@ import FirebaseCore
 import FirebaseFirestore
 import FirebaseStorage
 import Foundation
+import ImageIO
+import Photos
 import UIKit
 
 struct EncryptedMediaUploadResult {
@@ -46,43 +48,49 @@ final class EncryptedMediaService {
             throw EncryptedMediaServiceError.invalidMediaData
         }
 
-        let spaceKey = try await ensureSpaceKey(spaceID: spaceID)
         let fullJPEGData = try compressedJPEGData(for: image, maxDimension: 2200, compressionQuality: 0.78)
         let thumbnailJPEGData = try compressedJPEGData(for: image, maxDimension: 640, compressionQuality: 0.65)
-        let encryptedMedia = try encryptionService.encryptData(fullJPEGData, using: spaceKey)
-        let encryptedThumbnail = try encryptionService.encryptData(thumbnailJPEGData, using: spaceKey)
-
-        let mediaStoragePath = "spaces/\(spaceID)/media/\(mediaID).enc"
-        let thumbnailStoragePath = "spaces/\(spaceID)/media/\(mediaID)_thumb.enc"
-
-        try await uploadData(
-            Data(base64Encoded: encryptedMedia.ciphertext) ?? Data(),
-            to: storage.reference(withPath: mediaStoragePath),
-            progress: { value in progress?(value * 0.8) }
-        )
-        try await uploadData(
-            Data(base64Encoded: encryptedThumbnail.ciphertext) ?? Data(),
-            to: storage.reference(withPath: thumbnailStoragePath),
-            progress: { value in progress?(0.8 + (value * 0.2)) }
-        )
-
-        let metadata = EncryptedMediaMetadata(
-            mediaId: mediaID,
+        return try await uploadRasterMedia(
+            spaceID: spaceID,
+            mediaID: mediaID,
+            originalUploadData: fullJPEGData,
+            thumbnailImageData: thumbnailJPEGData,
             mediaType: mediaType,
-            storagePath: mediaStoragePath,
-            thumbnailStoragePath: thumbnailStoragePath,
-            encryptionVersion: "aes-gcm-v1",
-            nonce: encryptedMedia.nonce,
-            thumbnailNonce: encryptedThumbnail.nonce,
             mimeType: mimeType,
-            fileSize: fullJPEGData.count,
             width: Int(image.size.width),
             height: Int(image.size.height),
-            duration: nil,
-            createdAt: Date(),
-            uploadedBy: uploadedBy
+            uploadedBy: uploadedBy,
+            progress: progress
         )
-        return EncryptedMediaUploadResult(metadata: metadata)
+    }
+
+    func uploadAnimatedImage(
+        spaceID: String,
+        mediaID: String,
+        originalData: Data,
+        previewImageData: Data,
+        mediaType: MediaType,
+        mimeType: String,
+        uploadedBy: String,
+        progress: ((Double) -> Void)? = nil
+    ) async throws -> EncryptedMediaUploadResult {
+        guard let previewImage = UIImage(data: previewImageData) ?? UIImage(data: originalData) else {
+            throw EncryptedMediaServiceError.invalidMediaData
+        }
+        let thumbnailJPEGData = try compressedJPEGData(for: previewImage, maxDimension: 640, compressionQuality: 0.68)
+        let imageSize = imageSize(from: originalData) ?? previewImage.size
+        return try await uploadRasterMedia(
+            spaceID: spaceID,
+            mediaID: mediaID,
+            originalUploadData: originalData,
+            thumbnailImageData: thumbnailJPEGData,
+            mediaType: mediaType,
+            mimeType: mimeType,
+            width: Int(imageSize.width),
+            height: Int(imageSize.height),
+            uploadedBy: uploadedBy,
+            progress: progress
+        )
     }
 
     func uploadVideo(
@@ -112,8 +120,8 @@ final class EncryptedMediaService {
         let encryptedMedia = try encryptionService.encryptData(originalData, using: spaceKey)
         let encryptedThumbnail = try encryptionService.encryptData(thumbnailJPEGData, using: spaceKey)
 
-        let mediaStoragePath = "spaces/\(spaceID)/media/\(mediaID).enc"
-        let thumbnailStoragePath = "spaces/\(spaceID)/media/\(mediaID)_thumb.enc"
+        let mediaStoragePath = storageMediaPath(spaceID: spaceID, mediaID: mediaID)
+        let thumbnailStoragePath = storageThumbnailPath(spaceID: spaceID, mediaID: mediaID)
 
         try await uploadData(
             Data(base64Encoded: encryptedMedia.ciphertext) ?? Data(),
@@ -195,6 +203,9 @@ final class EncryptedMediaService {
         guard let metadata = media.metadata else {
             throw EncryptedMediaServiceError.invalidMediaData
         }
+        if media.type == .gif || media.mediaType == .gif || metadata.mediaType == .gif {
+            print("[GIF Receive] storage path resolved id=\(metadata.mediaId) kind=thumbnail path=\(metadata.thumbnailStoragePath ?? "") noncePresent=\(metadata.thumbnailNonce != nil)")
+        }
         return try await downloadData(
             spaceID: media.spaceID,
             storagePath: metadata.thumbnailStoragePath,
@@ -206,6 +217,9 @@ final class EncryptedMediaService {
     func fullData(for media: SpaceMedia) async throws -> Data {
         guard let metadata = media.metadata else {
             throw EncryptedMediaServiceError.invalidMediaData
+        }
+        if media.type == .gif || media.mediaType == .gif || metadata.mediaType == .gif {
+            print("[GIF Receive] storage path resolved id=\(metadata.mediaId) kind=full path=\(metadata.storagePath) noncePresent=true")
         }
         return try await downloadData(
             spaceID: media.spaceID,
@@ -227,6 +241,23 @@ final class EncryptedMediaService {
                 }
             }
             coordinator.save(image)
+        }
+    }
+
+    func saveImageFileToPhotos(fileURL: URL) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, fileURL: fileURL, options: nil)
+            }, completionHandler: { success, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if success {
+                    continuation.resume(returning: ())
+                } else {
+                    continuation.resume(throwing: EncryptedMediaServiceError.unableToSaveMedia)
+                }
+            })
         }
     }
 
@@ -297,7 +328,13 @@ final class EncryptedMediaService {
         guard let firestore else {
             throw EncryptedMediaServiceError.firestoreNotConfigured
         }
-        let reference = firestore.collection("spaces").document(spaceID).collection("encryption").document("key")
+        let reference: DocumentReference
+        if spaceID.hasPrefix("ping:") {
+            let pingID = String(spaceID.dropFirst("ping:".count))
+            reference = firestore.collection("pings").document(pingID).collection("encryption").document("key")
+        } else {
+            reference = firestore.collection("spaces").document(spaceID).collection("encryption").document("key")
+        }
         if let snapshot = try? await getDocument(reference),
            snapshot.exists,
            let data = snapshot.data(),
@@ -341,21 +378,119 @@ final class EncryptedMediaService {
         guard let spaceID, let storagePath, let nonce else {
             throw EncryptedMediaServiceError.invalidMediaData
         }
+        let isGIFReceive = cacheKey.hasPrefix("full:") || cacheKey.hasPrefix("thumb:")
         if let cached = decryptedDataCache.object(forKey: cacheKey as NSString) {
+            if isGIFReceive {
+                print("[GIF Receive] decrypt success cacheKey=\(cacheKey) source=cache")
+            }
             return Data(referencing: cached)
         }
         guard let storage else {
             throw EncryptedMediaServiceError.storageNotConfigured
         }
-        let encryptedBytes = try await fetchData(from: storage.reference(withPath: storagePath), maxSize: 24 * 1024 * 1024)
+        if isGIFReceive {
+            print("[GIF Receive] download started path=\(storagePath)")
+        }
+        let encryptedBytes: Data
+        do {
+            encryptedBytes = try await fetchData(from: storage.reference(withPath: storagePath), maxSize: 24 * 1024 * 1024)
+            if isGIFReceive {
+                print("[GIF Receive] download success path=\(storagePath) bytes=\(encryptedBytes.count)")
+            }
+        } catch {
+            if isGIFReceive {
+                print("[GIF Receive] download failed path=\(storagePath) error=\(error)")
+            }
+            throw error
+        }
         let key = try await ensureSpaceKey(spaceID: spaceID)
-        let decrypted = try encryptionService.decryptData(
-            ciphertext: encryptedBytes.base64EncodedString(),
-            nonce: nonce,
-            using: key
-        )
+        let decrypted: Data
+        do {
+            decrypted = try encryptionService.decryptData(
+                ciphertext: encryptedBytes.base64EncodedString(),
+                nonce: nonce,
+                using: key
+            )
+            if isGIFReceive {
+                print("[GIF Receive] decrypt success path=\(storagePath) bytes=\(decrypted.count)")
+            }
+        } catch {
+            if isGIFReceive {
+                print("[GIF Receive] decrypt failed path=\(storagePath) error=\(error)")
+            }
+            throw error
+        }
         decryptedDataCache.setObject(decrypted as NSData, forKey: cacheKey as NSString)
         return decrypted
+    }
+
+    private func uploadRasterMedia(
+        spaceID: String,
+        mediaID: String,
+        originalUploadData: Data,
+        thumbnailImageData: Data,
+        mediaType: MediaType,
+        mimeType: String,
+        width: Int?,
+        height: Int?,
+        uploadedBy: String,
+        progress: ((Double) -> Void)?
+    ) async throws -> EncryptedMediaUploadResult {
+        guard let storage else {
+            throw EncryptedMediaServiceError.storageNotConfigured
+        }
+
+        let spaceKey = try await ensureSpaceKey(spaceID: spaceID)
+        let encryptedMedia = try encryptionService.encryptData(originalUploadData, using: spaceKey)
+        let encryptedThumbnail = try encryptionService.encryptData(thumbnailImageData, using: spaceKey)
+
+        let mediaStoragePath = storageMediaPath(spaceID: spaceID, mediaID: mediaID)
+        let thumbnailStoragePath = storageThumbnailPath(spaceID: spaceID, mediaID: mediaID)
+
+        try await uploadData(
+            Data(base64Encoded: encryptedMedia.ciphertext) ?? Data(),
+            to: storage.reference(withPath: mediaStoragePath),
+            progress: { value in progress?(value * 0.8) }
+        )
+        try await uploadData(
+            Data(base64Encoded: encryptedThumbnail.ciphertext) ?? Data(),
+            to: storage.reference(withPath: thumbnailStoragePath),
+            progress: { value in progress?(0.8 + (value * 0.2)) }
+        )
+
+        let metadata = EncryptedMediaMetadata(
+            mediaId: mediaID,
+            mediaType: mediaType,
+            storagePath: mediaStoragePath,
+            thumbnailStoragePath: thumbnailStoragePath,
+            encryptionVersion: "aes-gcm-v1",
+            nonce: encryptedMedia.nonce,
+            thumbnailNonce: encryptedThumbnail.nonce,
+            mimeType: mimeType,
+            fileSize: originalUploadData.count,
+            width: width,
+            height: height,
+            duration: nil,
+            createdAt: Date(),
+            uploadedBy: uploadedBy
+        )
+        return EncryptedMediaUploadResult(metadata: metadata)
+    }
+
+    private func storageBasePath(for spaceID: String) -> String {
+        if spaceID.hasPrefix("ping:") {
+            let pingID = String(spaceID.dropFirst("ping:".count))
+            return "spaces/ping-\(pingID)"
+        }
+        return "spaces/\(spaceID)"
+    }
+
+    private func storageMediaPath(spaceID: String, mediaID: String) -> String {
+        "\(storageBasePath(for: spaceID))/media/\(mediaID).enc"
+    }
+
+    private func storageThumbnailPath(spaceID: String, mediaID: String) -> String {
+        "\(storageBasePath(for: spaceID))/media/\(mediaID)_thumb.enc"
     }
 
     private func compressedJPEGData(
@@ -457,6 +592,8 @@ final class EncryptedMediaService {
 
     private func fileExtension(for mimeType: String) -> String {
         switch mimeType.lowercased() {
+        case "image/gif":
+            return "gif"
         case "video/quicktime":
             return "mov"
         case "video/mp4":
@@ -482,6 +619,9 @@ final class EncryptedMediaService {
 
     private func mediaType(for mimeType: String) -> MediaType {
         let normalized = mimeType.lowercased()
+        if normalized == "image/gif" {
+            return .gif
+        }
         if normalized.hasPrefix("image/") {
             return .photo
         }
@@ -515,6 +655,18 @@ final class EncryptedMediaService {
                 }
             }
         }
+    }
+
+    private func imageSize(from data: Data) -> CGSize? {
+        guard
+            let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+            let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+            let height = properties[kCGImagePropertyPixelHeight] as? CGFloat
+        else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
     }
 }
 

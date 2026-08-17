@@ -1,6 +1,6 @@
 import Foundation
 
-struct Space: Identifiable, Hashable {
+struct Space: Codable, Identifiable, Hashable {
     let id: String
     let name: String
     let emoji: String
@@ -11,17 +11,15 @@ struct Space: Identifiable, Hashable {
     let memberIds: [String]
     let unreadCount: Int?
     let enabledModules: [SpaceModule]
+    let moduleOrder: [SpaceModule]
 
     var subtitle: String {
         description
     }
 
     var modules: [SpaceModule] {
-        var resolvedModules = enabledModules
-        if !resolvedModules.contains(.settings) {
-            resolvedModules.append(.settings)
-        }
-        return resolvedModules
+        let enabledSet = Set(enabledModules + [.settings])
+        return moduleOrder.filter { enabledSet.contains($0) }
     }
 
     var eventsEnabled: Bool {
@@ -37,7 +35,7 @@ struct Space: Identifiable, Hashable {
     }
 }
 
-enum SpaceModule: String, CaseIterable, Identifiable, Hashable {
+enum SpaceModule: String, Codable, CaseIterable, Identifiable, Hashable {
     case general = "general"
     case photos = "photos"
     case files = "files"
@@ -107,9 +105,13 @@ enum SpaceModule: String, CaseIterable, Identifiable, Hashable {
     static var configurableModules: [SpaceModule] {
         requiredModules + optionalModules
     }
+
+    static var allModules: [SpaceModule] {
+        configurableModules + [.settings]
+    }
 }
 
-enum SpaceTemplate: String, CaseIterable, Identifiable {
+enum SpaceTemplate: String, Codable, CaseIterable, Identifiable {
     case family = "Family"
     case friends = "Friends"
     case business = "Business"
@@ -161,5 +163,11 @@ enum SpaceTemplate: String, CaseIterable, Identifiable {
         case .custom:
             return SpaceModule.requiredModules
         }
+    }
+
+    var defaultModuleOrder: [SpaceModule] {
+        let enabled = defaultEnabledModules
+        let disabledOptional = SpaceModule.optionalModules.filter { !enabled.contains($0) }
+        return enabled + disabledOptional + [.settings]
     }
 }

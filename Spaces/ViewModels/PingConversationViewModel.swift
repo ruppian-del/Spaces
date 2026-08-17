@@ -1,6 +1,7 @@
 import Combine
 import FirebaseFirestore
 import Foundation
+import UIKit
 
 @MainActor
 final class PingConversationViewModel: ObservableObject {
@@ -10,6 +11,7 @@ final class PingConversationViewModel: ObservableObject {
     @Published private(set) var isSending = false
     @Published private(set) var isDeletingMessageIDs: Set<String> = []
     @Published var errorMessage: String?
+    @Published private(set) var selectedComposerMedia: ComposerMediaSelection?
     @Published private(set) var replyingToMessage: SpaceMessage?
     @Published private(set) var editingMessage: SpaceMessage?
 
@@ -35,7 +37,18 @@ final class PingConversationViewModel: ObservableObject {
     }
 
     var canSend: Bool {
-        !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
+        let hasText = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasMedia = selectedComposerMedia != nil
+        return (hasText || hasMedia) && !isSending
+    }
+
+    var selectedComposerUIImage: UIImage? {
+        guard let selectedComposerMedia else { return nil }
+        return UIImage(data: selectedComposerMedia.previewImageData)
+    }
+
+    var selectedComposerIsVideo: Bool {
+        selectedComposerMedia?.isVideo == true
     }
 
     var hasReplyContext: Bool {
@@ -71,6 +84,20 @@ final class PingConversationViewModel: ObservableObject {
         guard !isSending else { return }
         if let editingMessage {
             await saveEditedMessage(editingMessage)
+        } else if let selectedComposerMedia {
+            let trimmedCaption = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let caption = trimmedCaption.isEmpty ? nil : trimmedCaption
+            if selectedComposerMedia.isVideo {
+                await sendVideo(selectedComposerMedia.data, caption: caption, mimeType: selectedComposerMedia.mimeType)
+            } else {
+                await sendImage(
+                    selectedComposerMedia.data,
+                    caption: caption,
+                    mediaCategory: selectedComposerMedia.mediaCategory,
+                    previewImageData: selectedComposerMedia.previewImageData,
+                    mimeType: selectedComposerMedia.mimeType
+                )
+            }
         } else {
             await sendMessage()
         }
@@ -106,6 +133,42 @@ final class PingConversationViewModel: ObservableObject {
         replyingToMessage = message
     }
 
+    func selectComposerMedia(
+        data: Data?,
+        previewImageData: Data?,
+        mimeType: String?,
+        mediaCategory: String,
+        isVideo: Bool
+    ) {
+        let hasMedia = data != nil
+        let byteCount = data?.count ?? 0
+        print("[PingConversationViewModel][ComposerMedia] selected=\(hasMedia) byteCount=\(byteCount) mediaCategory=\(mediaCategory) isVideo=\(isVideo)")
+        if mediaCategory == "gif", hasMedia {
+            print("[GIF] Selected")
+        }
+        guard
+            let data,
+            let previewImageData,
+            let mimeType
+        else {
+            selectedComposerMedia = nil
+            return
+        }
+        editingMessage = nil
+        selectedComposerMedia = ComposerMediaSelection(
+            data: data,
+            previewImageData: previewImageData,
+            mimeType: mimeType,
+            mediaCategory: mediaCategory,
+            isVideo: isVideo
+        )
+    }
+
+    func removeComposerMedia() {
+        selectedComposerMedia = nil
+        print("[PingConversationViewModel][ComposerMedia] selected=false byteCount=0 removed=true")
+    }
+
     func cancelReply() {
         replyingToMessage = nil
     }
@@ -113,6 +176,7 @@ final class PingConversationViewModel: ObservableObject {
     func beginEditing(_ message: SpaceMessage) {
         guard canEdit(message), let text = message.text, !text.isEmpty else { return }
         replyingToMessage = nil
+        selectedComposerMedia = nil
         editingMessage = message
         composerText = text
     }
@@ -127,7 +191,7 @@ final class PingConversationViewModel: ObservableObject {
     }
 
     func canEdit(_ message: SpaceMessage) -> Bool {
-        message.senderId == currentUserID && !message.deleted && message.type == .text && message.media == nil
+        message.senderId == currentUserID && !message.deleted && message.type == .text && !message.hasMediaAttachments
     }
 
     func isDeleting(_ message: SpaceMessage) -> Bool {
@@ -186,6 +250,7 @@ final class PingConversationViewModel: ObservableObject {
                 deleted: message.deleted,
                 text: localPlaintextFallback,
                 media: message.media,
+                mediaItems: message.mediaItems,
                 createdAt: message.createdAt,
                 updatedAt: message.updatedAt,
                 timestamp: message.timestamp,
@@ -253,6 +318,7 @@ final class PingConversationViewModel: ObservableObject {
                 deleted: message.deleted,
                 text: message.text,
                 media: message.media,
+                mediaItems: message.mediaItems,
                 createdAt: message.createdAt,
                 updatedAt: message.updatedAt,
                 timestamp: message.timestamp,
@@ -283,6 +349,65 @@ final class PingConversationViewModel: ObservableObject {
             messages = applyReactions(to: baseMessages)
             composerText = ""
             editingMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func sendImage(
+        _ imageData: Data,
+        caption: String?,
+        mediaCategory: String,
+        previewImageData: Data,
+        mimeType: String
+    ) async {
+        guard !isSending else { return }
+
+        isSending = true
+        defer { isSending = false }
+
+        do {
+            let localMessage = try await pingService.sendImageMessage(
+                in: ping,
+                imageData: imageData,
+                caption: caption,
+                mediaCategory: mediaCategory,
+                previewImageData: previewImageData,
+                mimeType: mimeType,
+                replyContext: activeReplyContext()
+            )
+            pendingLocalMessagesByID[localMessage.id] = localMessage
+            refreshMessages(baseMessages)
+            if mediaCategory == "gif" {
+                print("[GIF] Message visible locally")
+            }
+            composerText = ""
+            selectedComposerMedia = nil
+            replyingToMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func sendVideo(_ videoData: Data, caption: String?, mimeType: String) async {
+        guard !isSending else { return }
+
+        isSending = true
+        defer { isSending = false }
+
+        do {
+            let localMessage = try await pingService.sendVideoMessage(
+                in: ping,
+                videoData: videoData,
+                caption: caption,
+                mimeType: mimeType,
+                replyContext: activeReplyContext()
+            )
+            pendingLocalMessagesByID[localMessage.id] = localMessage
+            refreshMessages(baseMessages)
+            composerText = ""
+            selectedComposerMedia = nil
+            replyingToMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }

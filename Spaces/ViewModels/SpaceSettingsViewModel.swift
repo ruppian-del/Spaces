@@ -27,6 +27,7 @@ final class SpaceSettingsViewModel: ObservableObject {
     @Published private(set) var isCreatingInvite = false
     @Published private(set) var isUpdatingInvite = false
     @Published private(set) var pendingInvite: SpaceInvite?
+    @Published private(set) var moduleOrder: [SpaceModule]
     @Published var errorMessage: String?
 
     let space: Space
@@ -47,6 +48,7 @@ final class SpaceSettingsViewModel: ObservableObject {
         self.eventsEnabled = space.eventsEnabled
         self.filesEnabled = space.filesEnabled
         self.pollsEnabled = space.pollsEnabled
+        self.moduleOrder = space.moduleOrder
     }
 
     init(space: Space, spaceService: SpaceService) {
@@ -64,6 +66,7 @@ final class SpaceSettingsViewModel: ObservableObject {
         self.eventsEnabled = space.eventsEnabled
         self.filesEnabled = space.filesEnabled
         self.pollsEnabled = space.pollsEnabled
+        self.moduleOrder = space.moduleOrder
     }
 
     var displayEmoji: String {
@@ -144,6 +147,24 @@ final class SpaceSettingsViewModel: ObservableObject {
         canManageModules = await spaceService.canManageModules(in: space)
         canManageRoles = await spaceService.canPerform(.manageRoles, in: space)
         canManageInvites = await spaceService.canPerform(.inviteMembers, in: space)
+        if let latestOrder = try? await spaceService.fetchModuleOrder(in: space) {
+            moduleOrder = latestOrder
+        }
+    }
+
+    func moveModule(fromOffsets: IndexSet, toOffset: Int) async {
+        var updatedOrder = moduleOrder
+        updatedOrder.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        moduleOrder = updatedOrder
+
+        do {
+            try await spaceService.updateModuleOrder(in: space, modules: updatedOrder)
+        } catch {
+            errorMessage = error.localizedDescription
+            if let latestOrder = try? await spaceService.fetchModuleOrder(in: space) {
+                moduleOrder = latestOrder
+            }
+        }
     }
 
     func handleFilesToggle(_ isEnabled: Bool) async {

@@ -15,6 +15,9 @@ struct SpaceMedia: Identifiable, Hashable {
     let thumbnailStoragePath: String?
     let mediaNonceBase64: String?
     let thumbnailNonceBase64: String?
+    let localPreviewImageData: Data?
+    let galleryItems: [SpaceMedia]?
+    let gallerySelectedIndex: Int
 
     init(
         id: String,
@@ -30,7 +33,10 @@ struct SpaceMedia: Identifiable, Hashable {
         mediaStoragePath: String? = nil,
         thumbnailStoragePath: String? = nil,
         mediaNonceBase64: String? = nil,
-        thumbnailNonceBase64: String? = nil
+        thumbnailNonceBase64: String? = nil,
+        localPreviewImageData: Data? = nil,
+        galleryItems: [SpaceMedia]? = nil,
+        gallerySelectedIndex: Int = 0
     ) {
         self.id = id
         self.spaceID = spaceID
@@ -54,6 +60,9 @@ struct SpaceMedia: Identifiable, Hashable {
         self.thumbnailStoragePath = resolvedMetadata?.thumbnailStoragePath ?? thumbnailStoragePath
         self.mediaNonceBase64 = resolvedMetadata?.nonce ?? mediaNonceBase64
         self.thumbnailNonceBase64 = resolvedMetadata?.thumbnailNonce ?? thumbnailNonceBase64
+        self.localPreviewImageData = localPreviewImageData
+        self.galleryItems = galleryItems
+        self.gallerySelectedIndex = gallerySelectedIndex
     }
 
     init(
@@ -70,7 +79,10 @@ struct SpaceMedia: Identifiable, Hashable {
         mediaStoragePath: String? = nil,
         thumbnailStoragePath: String? = nil,
         mediaNonceBase64: String? = nil,
-        thumbnailNonceBase64: String? = nil
+        thumbnailNonceBase64: String? = nil,
+        localPreviewImageData: Data? = nil,
+        galleryItems: [SpaceMedia]? = nil,
+        gallerySelectedIndex: Int = 0
     ) {
         self.init(
             id: id.uuidString,
@@ -86,7 +98,32 @@ struct SpaceMedia: Identifiable, Hashable {
             mediaStoragePath: mediaStoragePath,
             thumbnailStoragePath: thumbnailStoragePath,
             mediaNonceBase64: mediaNonceBase64,
-            thumbnailNonceBase64: thumbnailNonceBase64
+            thumbnailNonceBase64: thumbnailNonceBase64,
+            localPreviewImageData: localPreviewImageData,
+            galleryItems: galleryItems,
+            gallerySelectedIndex: gallerySelectedIndex
+        )
+    }
+
+    func withGallery(items: [SpaceMedia], selectedIndex: Int) -> SpaceMedia {
+        SpaceMedia(
+            id: id,
+            spaceID: spaceID,
+            type: type,
+            mediaCategory: mediaCategory,
+            mediaType: mediaType,
+            placeholderImageName: placeholderImageName,
+            caption: caption,
+            senderName: senderName,
+            timestamp: timestamp,
+            metadata: metadata,
+            mediaStoragePath: mediaStoragePath,
+            thumbnailStoragePath: thumbnailStoragePath,
+            mediaNonceBase64: mediaNonceBase64,
+            thumbnailNonceBase64: thumbnailNonceBase64,
+            localPreviewImageData: localPreviewImageData,
+            galleryItems: items,
+            gallerySelectedIndex: selectedIndex
         )
     }
 
