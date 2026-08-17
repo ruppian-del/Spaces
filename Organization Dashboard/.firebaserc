@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "spaces-by-circl"
+  },
+  "targets": {
+    "spaces-by-circl": {
+      "hosting": {
+        "dashboard": [
+          "spaces-by-circl"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,80 @@
+package com.arcinteractive.spaces.data.model
+
+import androidx.compose.ui.graphics.Color
+
+data class Space(
+    val id: String,
+    val name: String,
+    val emoji: String,
+    val colorHex: String,
+    val description: String,
+    val template: SpaceTemplate,
+    val ownerId: String,
+    val memberIds: List<String>,
+    val unreadCount: Int?,
+    val enabledModules: List<SpaceModule>,
+    val moduleOrder: List<SpaceModule>,
+    val rolePermissionOverrides: Map<SpaceMemberRole, Set<SpacePermission>> = emptyMap()
+) {
+    val subtitle: String
+        get() = description
+
+    val modules: List<SpaceModule>
+        get() {
+            val enabledIds = (enabledModules + SpaceModules.Settings).map { it.id }.toSet()
+            return moduleOrder.filter { enabledIds.contains(it.id) }
+        }
+
+    val eventsEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Events.id }
+
+    val announcementsEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Announcements.id }
+    val roomsEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Rooms.id }
+
+    val filesEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Files.id }
+
+    val pollsEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Polls.id }
+    val listsEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Lists.id }
+    val notesEnabled: Boolean
+        get() = enabledModules.any { it.id == SpaceModules.Notes.id }
+}
+
+enum class SpaceTemplate(val title: String, val subtitle: String, val suggestedEmoji: String) {
+    Family("Family", "Shared updates and planning", "\uD83C\uDFE1"),
+    Friends("Friends", "Chats, plans, and photos", "\uD83E\uDEE6"),
+    Business("Business", "Projects and team coordination", "\uD83D\uDCBC"),
+    Community("Community", "Events and announcements", "\uD83C\uDF0E"),
+    Custom("Custom", "Start with a blank space", "✨");
+
+    val defaultStatus: String
+        get() = when (this) {
+            Family -> "Family updates and plans"
+            Friends -> "Conversations and hangouts"
+            Business -> "Team communication hub"
+            Community -> "Events and announcements"
+            Custom -> "A new shared space"
+        }
+
+    val defaultEnabledModules: List<SpaceModule>
+        get() = when (this) {
+            Family -> SpaceModules.required + listOf(SpaceModules.Announcements, SpaceModules.Events)
+            Friends -> SpaceModules.required + listOf(SpaceModules.Events)
+            Business -> SpaceModules.required + listOf(SpaceModules.Announcements, SpaceModules.Events, SpaceModules.Files)
+            Community -> SpaceModules.required + listOf(SpaceModules.Announcements, SpaceModules.Events, SpaceModules.Files)
+            Custom -> SpaceModules.required
+        }
+
+    val defaultModuleOrder: List<SpaceModule>
+        get() {
+            val enabled = defaultEnabledModules
+            val disabledOptional = SpaceModules.optional.filter { candidate ->
+                enabled.none { it.id == candidate.id }
+            }
+            return enabled + disabledOptional + SpaceModules.Settings
+        }
+}

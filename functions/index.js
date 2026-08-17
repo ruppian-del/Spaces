@@ -51,14 +51,25 @@ exports.sendNotificationPush = functions.firestore.document("notifications/{noti
     return;
   }
 
-  const title = typeof notification.title === "string" && notification.title.trim().length
+  const actionTitle = typeof notification.title === "string" && notification.title.trim().length
     ? notification.title.trim()
     : "New update in Spaces";
+  const actorName = await resolveActorName(notification, actorId);
+  const title = actorName && !actionTitle.toLocaleLowerCase().startsWith(actorName.toLocaleLowerCase())
+    ? `${actorName} ${actionTitle}`
+    : actionTitle;
   const body = typeof notification.subtitle === "string" && notification.subtitle.trim().length
     ? notification.subtitle.trim()
     : (typeof notification.spaceName === "string" && notification.spaceName.trim().length
-      ? notification.spaceName.trim()
+      ? `In ${notification.spaceName.trim()}`
       : "Open Spaces to view this notification");
+
+  const recipientNotifications = await admin
+    .firestore()
+    .collection("notifications")
+    .where("recipientId", "==", recipientId)
+    .get();
+  const unreadCount = recipientNotifications.docs.filter((document) => document.get("read") !== true).length;
 
   const dataPayload = {
     notificationId,
@@ -66,6 +77,7 @@ exports.sendNotificationPush = functions.firestore.document("notifications/{noti
     targetId: stringValue(notification.targetId),
     targetType,
     type: notificationType,
+    badgeCount: String(unreadCount),
   };
 
   let response;
@@ -81,6 +93,7 @@ exports.sendNotificationPush = functions.firestore.document("notifications/{noti
         payload: {
           aps: {
             sound: "default",
+            badge: unreadCount,
           },
         },
       },
@@ -88,6 +101,7 @@ exports.sendNotificationPush = functions.firestore.document("notifications/{noti
         priority: "high",
         notification: {
           sound: "default",
+          notificationCount: unreadCount,
         },
       },
     });
@@ -175,6 +189,172 @@ function stringValue(value) {
   return typeof value === "string" ? value : "";
 }
 
+exports.deleteAccount = functions
+  .runWith({ timeoutSeconds: 540, memory: "512MB" })
+  .https.onCall(async (_data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) {
+      throw new functions.https.HttpsError(
+        "unauthenticated",
+        "You must be signed in to delete your account."
+      );
+    }
+
+    const firestore = admin.firestore();
+
+    try {
+      await removeUserFromSpaces(firestore, uid);
+      await deleteQueryDocuments(
+        firestore.collection("notifications").where("recipientId", "==", uid)
+      );
+      await anonymizeQueryDocuments(
+        firestore.collection("notifications").where("actorId", "==", uid),
+        {
+          actorId: "deleted-user",
+          actorName: "Deleted User",
+          actorEmoji: "",
+        }
+      );
+      await anonymizeQueryDocuments(
+        firestore.collection("activity").where("actorId", "==", uid),
+        {
+          actorId: "deleted-user",
+          actorName: "Deleted User",
+          actorEmoji: "",
+        }
+      );
+      await removeActivityVisibility(firestore, uid);
+      await deactivateInvitesCreatedBy(firestore, uid);
+
+      // recursiveDelete removes the profile plus devices, push tokens, and any
+      // future user-owned subcollections without requiring client permissions.
+      await firestore.recursiveDelete(firestore.collection("users").doc(uid));
+
+      // Delete Auth last. Every preceding operation is safe to retry if this
+      // callable is interrupted before completion.
+      try {
+        await admin.auth().deleteUser(uid);
+      } catch (error) {
+        if (error?.code !== "auth/user-not-found") {
+          throw error;
+        }
+      }
+
+      return { deleted: true };
+    } catch (error) {
+      logger.error("Account deletion failed", {
+        uid,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw new functions.https.HttpsError(
+        "internal",
+        "Spaces could not finish deleting your account. Your account remains available so you can retry."
+      );
+    }
+  });
+
+async function removeUserFromSpaces(firestore, uid) {
+  const spacesSnapshot = await firestore
+    .collection("spaces")
+    .where("memberIds", "array-contains", uid)
+    .get();
+
+  for (const spaceDocument of spacesSnapshot.docs) {
+    const spaceReference = spaceDocument.ref;
+    const spaceData = spaceDocument.data();
+    const membersSnapshot = await spaceReference.collection("members").get();
+    const remainingMembers = membersSnapshot.docs.filter((document) => document.id !== uid);
+
+    if (remainingMembers.length === 0) {
+      await firestore.recursiveDelete(spaceReference);
+      continue;
+    }
+
+    const update = {
+      memberIds: admin.firestore.FieldValue.arrayRemove(uid),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (stringValue(spaceData.ownerId) === uid) {
+      const replacementOwner = remainingMembers.find(
+        (document) => stringValue(document.data().role).toLowerCase() === "admin"
+      ) || remainingMembers[0];
+      update.ownerId = replacementOwner.id;
+      await replacementOwner.ref.set(
+        {
+          role: "owner",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+
+    await spaceReference.set(update, { merge: true });
+    await spaceReference.collection("members").doc(uid).delete();
+  }
+}
+
+async function deleteQueryDocuments(query) {
+  const snapshot = await query.get();
+  await commitInChunks(snapshot.docs.map((document) => ({
+    type: "delete",
+    reference: document.ref,
+  })));
+}
+
+async function anonymizeQueryDocuments(query, fields) {
+  const snapshot = await query.get();
+  await commitInChunks(snapshot.docs.map((document) => ({
+    type: "set",
+    reference: document.ref,
+    fields,
+  })));
+}
+
+async function removeActivityVisibility(firestore, uid) {
+  const snapshot = await firestore
+    .collection("activity")
+    .where("visibleTo", "array-contains", uid)
+    .get();
+  await commitInChunks(snapshot.docs.map((document) => ({
+    type: "set",
+    reference: document.ref,
+    fields: {
+      visibleTo: admin.firestore.FieldValue.arrayRemove(uid),
+    },
+  })));
+}
+
+async function deactivateInvitesCreatedBy(firestore, uid) {
+  const snapshot = await firestore
+    .collection("spaceInvites")
+    .where("createdBy", "==", uid)
+    .get();
+  await commitInChunks(snapshot.docs.map((document) => ({
+    type: "set",
+    reference: document.ref,
+    fields: {
+      active: false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+  })));
+}
+
+async function commitInChunks(operations) {
+  const firestore = admin.firestore();
+  for (let index = 0; index < operations.length; index += 400) {
+    const batch = firestore.batch();
+    operations.slice(index, index + 400).forEach((operation) => {
+      if (operation.type === "delete") {
+        batch.delete(operation.reference);
+      } else {
+        batch.set(operation.reference, operation.fields, { merge: true });
+      }
+    });
+    await batch.commit();
+  }
+}
+
 async function updateNotificationDeliveryState(notificationId, delivered, deliveryError) {
   const payload = {
     delivered,
@@ -182,4 +362,23 @@ async function updateNotificationDeliveryState(notificationId, delivered, delive
     deliveryError: deliveryError || null,
   };
   await admin.firestore().collection("notifications").doc(notificationId).set(payload, { merge: true });
+}
+
+async function resolveActorName(notification, actorId) {
+  const storedName = stringValue(notification.actorName).trim();
+  if (storedName) return storedName;
+  if (!actorId) return "Someone";
+
+  try {
+    const profile = await admin.firestore().collection("users").doc(actorId).get();
+    const profileName = stringValue(profile.get("displayName")).trim();
+    if (profileName) return profileName;
+  } catch (error) {
+    logger.warn("Unable to resolve notification actor name", {
+      actorId,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return "Someone";
 }

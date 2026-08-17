@@ -14,6 +14,82 @@ service cloud.firestore {
       return signedIn() && request.auth.uid in spaceDoc(spaceId).data.memberIds;
     }
 
+    // Organization membership — v1.6
+    function organizationDoc(organizationId) {
+      return get(/databases/$(database)/documents/organizations/$(organizationId));
+    }
+
+    function isOrganizationMember(organizationId) {
+      return signedIn()
+        && request.auth.uid in organizationDoc(organizationId).data.memberIds;
+    }
+
+    function organizationMemberDoc(organizationId, userId) {
+      return get(/databases/$(database)/documents/organizations/$(organizationId)/members/$(userId));
+    }
+
+    function isOrganizationAdministrator(organizationId) {
+      return isOrganizationMember(organizationId)
+        && organizationMemberDoc(organizationId, request.auth.uid).data.status == "active"
+        && organizationMemberDoc(organizationId, request.auth.uid).data.role in ["primary_admin", "admin"];
+    }
+
+    function isOrganizationPrimaryAdministrator(organizationId) {
+      return isOrganizationAdministrator(organizationId)
+        && organizationMemberDoc(organizationId, request.auth.uid).data.role == "primary_admin";
+    }
+
+    function validOrganizationMemberDocument(userId) {
+      return request.resource.data.userId == userId
+        && request.resource.data.displayName is string
+        && request.resource.data.role in ["primary_admin", "admin", "member"]
+        && request.resource.data.status == "active";
+    }
+
+    function validOrganizationInviteJoin(organizationId) {
+      let memberAfter = getAfter(/databases/$(database)/documents/organizations/$(organizationId)/members/$(request.auth.uid));
+      let invite = get(/databases/$(database)/documents/organizationInvites/$(memberAfter.data.inviteCode));
+      return signedIn()
+        && memberAfter.data.userId == request.auth.uid
+        && memberAfter.data.inviteCode is string
+        && invite.data.active == true
+        && invite.data.organizationId == organizationId
+        && memberAfter.data.role == invite.data.role;
+    }
+
+    // A Space without organizationId keeps the existing personal-Space path.
+    // An organization-owned Space must be created by that organization's admin.
+    function validOrganizationSpaceCreate() {
+      return !request.resource.data.keys().hasAll(["organizationId"])
+        || (
+          request.resource.data.organizationId is string
+          && isOrganizationAdministrator(request.resource.data.organizationId)
+        );
+    }
+
+    // Founding organization bootstrap — the parent and primary-admin member
+    // document must be written together in one batch.
+    function validFoundingOrganization() {
+      return request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.status == "active"
+        && request.resource.data.memberIds is list
+        && request.resource.data.memberIds.size() == 1
+        && request.resource.data.memberIds[0] == request.auth.uid;
+    }
+
+    function validFoundingOrganizationMember(organizationId, userId) {
+      let organizationAfter = getAfter(/databases/$(database)/documents/organizations/$(organizationId));
+      return request.auth.uid == userId
+        && organizationAfter.data.memberIds is list
+        && organizationAfter.data.memberIds.size() == 1
+        && organizationAfter.data.memberIds[0] == request.auth.uid
+        && request.resource.data.userId == userId
+        && request.resource.data.displayName is string
+        && request.resource.data.role == "primary_admin"
+        && request.resource.data.status == "active";
+    }
+
     function memberDoc(spaceId, userId) {
       return get(/databases/$(database)/documents/spaces/$(spaceId)/members/$(userId));
     }
@@ -584,12 +660,65 @@ service cloud.firestore {
         && request.resource.data.enabled is bool;
     }
 
+    // Organizations — v1.6
+    match /organizations/{organizationId} {
+      // This direct resource check authorizes the memberIds array query used by
+      // the Organization tab without exposing organizations to other users.
+      allow read: if signedIn() && request.auth.uid in resource.data.memberIds;
+
+      // A signed-in person may create only an organization that starts with
+      // themselves as its sole member. The matching primary-admin document is
+      // required by the member rule below in the same batch.
+      allow create: if signedIn() && validFoundingOrganization();
+
+      // People are added by a primary administrator; other organization fields
+      // remain immutable until their matching settings surface exists.
+      allow update: if isOrganizationPrimaryAdministrator(organizationId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["memberIds", "usage"])
+        || validOrganizationInviteJoin(organizationId);
+      allow delete: if false;
+
+      match /members/{userId} {
+        allow read: if isOrganizationMember(organizationId);
+
+        // Only the founding member can create the initial primary-admin record,
+        // and only alongside the organization creation batch.
+        allow create: if signedIn()
+          && validFoundingOrganizationMember(organizationId, userId);
+
+        allow create: if isOrganizationPrimaryAdministrator(organizationId)
+          && validOrganizationMemberDocument(userId);
+        allow create: if request.auth.uid == userId
+          && validOrganizationMemberDocument(userId)
+          && validOrganizationInviteJoin(organizationId);
+        allow update: if isOrganizationPrimaryAdministrator(organizationId)
+          && validOrganizationMemberDocument(userId);
+        allow delete: if false;
+      }
+    }
+
+    // Organization invites — v1.6
+    match /organizationInvites/{inviteCode} {
+      allow read: if signedIn() && resource.data.active == true;
+      allow create: if signedIn()
+        && request.resource.data.organizationId is string
+        && isOrganizationPrimaryAdministrator(request.resource.data.organizationId)
+        && request.resource.data.role in ["admin", "member"]
+        && request.resource.data.active == true;
+      allow update: if signedIn()
+        && resource.data.active == true
+        && request.resource.data.active == false
+        && request.resource.data.usedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
     match /spaces/{spaceId} {
       allow read: if signedIn() && request.auth.uid in resource.data.memberIds;
       allow create: if signedIn()
         && request.resource.data.ownerId == request.auth.uid
         && request.resource.data.memberIds is list
-        && request.auth.uid in request.resource.data.memberIds;
+        && request.auth.uid in request.resource.data.memberIds
+        && validOrganizationSpaceCreate();
       allow update: if isSpaceMember(spaceId);
 
       match /members/{userId} {
