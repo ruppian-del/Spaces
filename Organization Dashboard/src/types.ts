@@ -61,6 +61,43 @@ export interface DashboardData {
   spaces: OrganizationSpace[]
 }
 
+export interface SpaceDashboardSpace {
+  id: string
+  organizationId: string | null
+  name: string
+  emoji: string
+  description: string
+  memberCount: number
+  enabledModuleIds: string[]
+  moduleOrder: string[]
+  tintHex: string
+  template: string
+  allowedModuleIds: string[]
+  role: 'organization_admin' | 'owner' | 'admin'
+}
+
+export type SpaceMemberRole = 'owner' | 'admin' | 'moderator' | 'member' | 'guest'
+
+export interface SpaceDashboardMember {
+  id: string
+  displayName: string
+  emojiAvatar: string
+  role: SpaceMemberRole
+}
+
+export interface SpaceDashboardInvite {
+  code: string
+  expiresAt: Date
+}
+
+
+export interface SpaceDashboardActivity {
+  id: string
+  title: string
+  actorName: string
+  createdAt: Date | null
+}
+
 export type LoadState =
   | { kind: 'loading' }
   | { kind: 'empty' }

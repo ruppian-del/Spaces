@@ -7,6 +7,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { OrganizationOnboardingPage } from './pages/OrganizationOnboardingPage'
 import { OrganizationSettingsPage } from './pages/OrganizationSettingsPage'
 import { OrganizationBillingPage } from './pages/OrganizationBillingPage'
+import { SpaceDashboardPage } from './pages/SpaceDashboardPage'
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -22,6 +23,8 @@ export default function App() {
     <Route path="/organizations/:organizationId" element={<Protected><DashboardPage /></Protected>} />
     <Route path="/organizations/:organizationId/settings" element={<Protected><OrganizationSettingsPage /></Protected>} />
     <Route path="/organizations/:organizationId/billing" element={<Protected><OrganizationBillingPage /></Protected>} />
+    <Route path="/spaces/:spaceId?" element={<Protected><SpaceDashboardPage /></Protected>} />
+    <Route path="/" element={<Navigate to="/organizations" replace />} />
     <Route path="*" element={<Navigate to="/sign-in" replace />} />
   </Routes></BrowserRouter></AuthProvider>
 }
