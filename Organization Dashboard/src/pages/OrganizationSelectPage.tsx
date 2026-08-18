@@ -16,7 +16,11 @@ export function OrganizationSelectPage() {
     try {
       const next = await listOrganizations(user!.uid)
       setOrganizations(next)
-      setState(next.length ? { kind: 'ready', data: { organization: next[0], administrators: [], spaces: [] } } : { kind: 'empty' })
+      if (next.length === 0) {
+        navigate('/organizations/new', { replace: true })
+        return
+      }
+      setState({ kind: 'ready', data: { organization: next[0], administrators: [], spaces: [] } })
     } catch (error: unknown) {
       const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
       setState(code.includes('permission-denied') ? { kind: 'permission-denied' } : { kind: 'error', message: 'Check your connection and try again.' })

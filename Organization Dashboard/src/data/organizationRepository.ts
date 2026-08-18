@@ -70,12 +70,22 @@ function allowedSpaceModules(entitlements: string[]): string[] {
 export async function listSpaceDashboardActivity(userId: string, spaceId: string): Promise<SpaceDashboardActivity[]> {
   if (!db) return []
   const snapshot = await getDocs(query(collection(db, 'activity'), where('visibleTo', 'array-contains', userId), limit(40)))
-  return snapshot.docs.map((document) => {
+  const entries = snapshot.docs.map((document) => {
     const data = document.data()
     if (data.spaceId !== spaceId) return null
     const timestamp = data.createdAt && typeof data.createdAt.toDate === 'function' ? data.createdAt.toDate() : null
-    return { id: document.id, title: typeof data.title === 'string' ? data.title : 'updated this Space', actorName: typeof data.actorName === 'string' ? data.actorName : 'Member', createdAt: timestamp }
-  }).filter((value): value is SpaceDashboardActivity => value !== null).sort((a, b) => Number(b.createdAt) - Number(a.createdAt)).slice(0, 6)
+    const actorName = typeof data.actorName === 'string' ? data.actorName.trim() : ''
+    if (!actorName || actorName === 'Deleted User') return null
+    return { id: document.id, title: typeof data.title === 'string' ? data.title : 'updated this Space', actorName, createdAt: timestamp }
+  }).filter((value): value is SpaceDashboardActivity => value !== null).sort((a, b) => Number(b.createdAt) - Number(a.createdAt))
+  const seen = new Set<string>()
+  return entries.filter((entry) => {
+    const date = entry.createdAt ? entry.createdAt.toDateString() : ''
+    const key = `${entry.actorName}|${entry.title}|${date}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  }).slice(0, 6)
 }
 
 const spaceMemberRoles = new Set<SpaceMemberRole>(['owner', 'admin', 'moderator', 'member', 'guest'])

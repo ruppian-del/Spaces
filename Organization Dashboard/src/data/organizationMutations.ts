@@ -9,6 +9,12 @@ import { cleanOrganizationIdentity, FOUNDATION_ENTITLEMENTS } from './organizati
 import type { Organization, OrganizationIdentityInput, OrganizationInvitation, OrganizationMember, OrganizationRole } from '../types'
 
 const inFlightCreations = new Map<string, Promise<Organization>>()
+const FREE_ORGANIZATION_ENTITLEMENTS = {
+  peopleCapacity: 25,
+  activeSpaceCapacity: 1,
+  enabledModuleIds: ['general', 'events', 'polls', 'activity', 'members', 'settings'],
+  mediaStorageCapacityBytes: 1024 ** 3,
+} as const
 
 export function deduplicateInFlight<T>(operations: Map<string, Promise<T>>, key: string, operation: () => Promise<T>): Promise<T> {
   const existing = operations.get(key)
@@ -29,7 +35,8 @@ function identityFields(input: OrganizationIdentityInput) {
   }
 }
 
-export function buildFoundingOrganizationData(input: OrganizationIdentityInput, creatorId: string, requestId: string, timestamp: unknown) {
+export function buildFoundingOrganizationData(input: OrganizationIdentityInput, creatorId: string, requestId: string, timestamp: unknown, startWithFoundation = true) {
+  const entitlements = startWithFoundation ? FOUNDATION_ENTITLEMENTS : FREE_ORGANIZATION_ENTITLEMENTS
   return {
     ...identityFields(input),
     status: 'active',
@@ -38,10 +45,10 @@ export function buildFoundingOrganizationData(input: OrganizationIdentityInput, 
     creationRequestId: requestId,
     createdAt: timestamp,
     entitlements: {
-      peopleCapacity: FOUNDATION_ENTITLEMENTS.peopleCapacity,
-      activeSpaceCapacity: FOUNDATION_ENTITLEMENTS.activeSpaceCapacity,
-      enabledModuleIds: [...FOUNDATION_ENTITLEMENTS.enabledModuleIds].sort(),
-      mediaStorageCapacityBytes: FOUNDATION_ENTITLEMENTS.mediaStorageCapacityBytes,
+      peopleCapacity: entitlements.peopleCapacity,
+      activeSpaceCapacity: entitlements.activeSpaceCapacity,
+      enabledModuleIds: [...entitlements.enabledModuleIds].sort(),
+      mediaStorageCapacityBytes: entitlements.mediaStorageCapacityBytes,
     },
     usage: { peopleCount: 1, activeSpaceCount: 0, mediaStorageBytes: 0 },
   }
@@ -64,6 +71,7 @@ async function createFoundationOrganization(
   input: OrganizationIdentityInput,
   creator: User,
   requestId: string,
+  startWithFoundation: boolean,
 ): Promise<Organization> {
   if (!db) throw new Error('Firebase is not configured.')
   const organizationRef = doc(db, 'organizations', requestId)
@@ -75,7 +83,7 @@ async function createFoundationOrganization(
   }
   const timestamp = serverTimestamp()
   const batch = writeBatch(db)
-  batch.set(organizationRef, buildFoundingOrganizationData(input, creator.uid, requestId, timestamp))
+  batch.set(organizationRef, buildFoundingOrganizationData(input, creator.uid, requestId, timestamp, startWithFoundation))
   batch.set(doc(organizationRef, 'members', creator.uid), buildPrimaryAdministratorData(creator, timestamp))
   await batch.commit()
   const created = await getDoc(organizationRef)
@@ -84,8 +92,8 @@ async function createFoundationOrganization(
   return organization
 }
 
-export function createFoundationOrganizationOnce(input: OrganizationIdentityInput, creator: User, requestId: string): Promise<Organization> {
-  return deduplicateInFlight(inFlightCreations, requestId, () => createFoundationOrganization(input, creator, requestId))
+export function createFoundationOrganizationOnce(input: OrganizationIdentityInput, creator: User, requestId: string, startWithFoundation = true): Promise<Organization> {
+  return deduplicateInFlight(inFlightCreations, requestId, () => createFoundationOrganization(input, creator, requestId, startWithFoundation))
 }
 
 export async function updateOrganizationIdentity(organizationId: string, input: OrganizationIdentityInput): Promise<void> {
