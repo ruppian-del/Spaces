@@ -28,7 +28,10 @@ export function OrganizationBillingPage() {
   useEffect(() => {
     if (!functions || !organizationId) return
     const getPlan = httpsCallable<{ organizationId: string }, SubscriptionData>(functions, 'getOrganizationSubscription')
-    void getPlan({ organizationId }).then(({ data }) => { if (data.selection) setSelection(data.selection); setStatus(data.status ?? null); setPeriodEnd(data.currentPeriodEnd ?? null); setCancelsAtPeriodEnd(data.cancelAtPeriodEnd === true) }).catch(() => setError('Your subscription could not be loaded.'))
+    void getPlan({ organizationId }).then(({ data }) => { if (data.selection) setSelection(data.selection); setStatus(data.status ?? null); setPeriodEnd(data.currentPeriodEnd ?? null); setCancelsAtPeriodEnd(data.cancelAtPeriodEnd === true) }).catch((reason: unknown) => {
+      const detail = reason instanceof Error && reason.message ? reason.message : 'Please try again.'
+      setError(`Your subscription could not be loaded: ${detail}`)
+    })
   }, [organizationId])
   useEffect(() => {
     if (!status) return

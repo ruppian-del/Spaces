@@ -1,0 +1,49 @@
+import { ArrowLeft, BarChart3, CalendarDays, Check, ListTodo, Megaphone, MessageSquareText, NotebookPen } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useAuth } from '../auth/AuthContext'
+import { Brand } from '../components/Brand'
+import { listAccessibleSpaceDashboards, listSpaceWorkspaceRecords, openWorkspaceAsset, readCachedSpaceDashboards } from '../data/organizationRepository'
+import type { SpaceDashboardSpace, SpaceWorkspaceRecord } from '../types'
+import './space-workspace.css'
+import './space-assets.css'
+import './file-preview.css'
+
+const tools = [['events', 'Events', CalendarDays], ['polls', 'Polls', BarChart3], ['lists', 'Lists', ListTodo], ['notes', 'Notes', NotebookPen], ['announcements', 'Announcements', Megaphone], ['rooms', 'Rooms', MessageSquareText]] as const
+type WorkspaceTool = (typeof tools)[number][0] | 'files'
+const moduleNames: Record<string, string> = { general: 'Space Pings', announcements: 'Announcements', rooms: 'Rooms', photos: 'Media', files: 'Files', polls: 'Polls', events: 'Events', lists: 'Lists', notes: 'Notes', members: 'Members', settings: 'Settings' }
+const formatDate = (value: Date | null | undefined) => value ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(value) : null
+
+function WorkspaceRecord({ record, tool, spaceId }: { record: SpaceWorkspaceRecord; tool: WorkspaceTool; spaceId: string }) {
+  const recordDate = formatDate(record.createdAt)
+  const [opening, setOpening] = useState(false)
+  const [error, setError] = useState('')
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl) }, [previewUrl])
+  const openAsset = async (action: 'view' | 'download') => {
+    if (!record.asset) return
+    setOpening(true); setError('')
+    try {
+      const url = await openWorkspaceAsset(spaceId, record.asset)
+      const link = document.createElement('a'); link.href = url
+      if (action === 'download') { link.download = record.asset.filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 60_000) } else { if (previewUrl) URL.revokeObjectURL(previewUrl); setPreviewUrl(url) }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'This file could not be opened.') } finally { setOpening(false) }
+  }
+  const mimeType = record.asset?.mimeType ?? ''
+  const canPreview = /^image\//.test(mimeType) || /^video\//.test(mimeType) || /^audio\//.test(mimeType) || /^text\//.test(mimeType) || mimeType === 'application/pdf' || /\.(pdf|txt|md|json|csv)$/i.test(record.title)
+  return <article className={`workspace-record workspace-record-${tool}`}><div className="workspace-record-main"><div className="workspace-record-title-row"><strong>{record.title}</strong>{record.author && <span>by {record.author}</span>}</div>{record.asset?.thumbnailUrl && <img className="workspace-media-preview" src={record.asset.thumbnailUrl} alt="" />}{record.detail && <p className="workspace-record-detail">{record.detail}</p>}{record.asset && <div className="workspace-asset-actions">{tool === 'files' && canPreview && <button className="workspace-asset-button" onClick={() => void openAsset('view')} disabled={opening}>{opening ? 'Opening…' : 'View file'}</button>}<button className="workspace-asset-button" onClick={() => void openAsset(tool === 'files' ? 'download' : 'view')} disabled={opening}>{opening ? 'Opening…' : tool === 'files' ? 'Download' : 'View media'}</button></div>}{tool === 'files' && record.asset && !canPreview && <p className="workspace-file-note">This file type is available for download.</p>}{previewUrl && <div className="workspace-file-preview"><button onClick={() => { URL.revokeObjectURL(previewUrl); setPreviewUrl(null) }}>Close preview</button>{mimeType.startsWith('image/') ? <img src={previewUrl} alt={record.title} /> : mimeType.startsWith('video/') ? <video controls src={previewUrl} /> : mimeType.startsWith('audio/') ? <audio controls src={previewUrl} /> : <iframe title={record.title} src={previewUrl} />}</div>}{error && <p className="workspace-asset-error">{error}</p>}{record.itemSummary && <div className="list-progress"><span>{record.itemSummary.completed} of {record.itemSummary.total} complete</span><i><b style={{ width: `${record.itemSummary.total ? Math.round((record.itemSummary.completed / record.itemSummary.total) * 100) : 0}%` }} /></i><ul>{record.itemSummary.items.slice(0, 6).map(item => <li key={`${item.title}-${String(item.dueDate)}`} className={item.completed ? 'complete' : ''}><Check size={14} /><span>{item.title}</span>{item.dueDate && <small>Due {formatDate(item.dueDate)}</small>}</li>)}</ul></div>}{record.pollResults && <div className="poll-results"><span>{record.totalVotes ?? 0} vote{record.totalVotes === 1 ? '' : 's'}</span>{record.pollResults.map(result => <div className="poll-result" key={result.label}><div><span>{result.label}</span><strong>{result.votes} · {result.percent}%</strong></div><i><b style={{ width: `${result.percent}%` }} /></i></div>)}</div>}{record.reactions && record.reactions.length > 0 && <div className="workspace-reactions">{record.reactions.map(reaction => <span key={reaction.emoji}>{reaction.emoji} {reaction.count}</span>)}</div>}{record.comments && record.comments.length > 0 && <div className="workspace-comments">{record.comments.slice(0, 3).map((comment, index) => <p key={`${comment.author}-${index}`}><strong>{comment.author}</strong> {comment.body}</p>)}</div>}{record.metadata.length > 0 && <div className="workspace-record-metadata">{record.metadata.map(item => <span key={item}>{item}</span>)}</div>}</div>{recordDate && <small className="workspace-record-date">{recordDate}</small>}</article>
+}
+
+export function SpaceWorkspacePage() {
+  const { user } = useAuth(); const { spaceId } = useParams(); const navigate = useNavigate()
+  const [spaces, setSpaces] = useState<SpaceDashboardSpace[]>([]); const [loading, setLoading] = useState(true); const [active, setActive] = useState<WorkspaceTool>('events'); const [recordsByTool, setRecordsByTool] = useState<Partial<Record<WorkspaceTool, SpaceWorkspaceRecord[]>>>({}); const [loadedTools, setLoadedTools] = useState<WorkspaceTool[]>([])
+  const space = useMemo(() => spaces.find(item => item.id === spaceId) ?? spaces[0] ?? null, [spaces, spaceId])
+  const available = useMemo(() => tools.filter(([id]) => space?.enabledModuleIds.includes(id) && space.allowedModuleIds.includes(id)), [space])
+  const activeTitle = tools.find(([id]) => id === active)?.[1] ?? 'Workspace'; const records = recordsByTool[active] ?? []; const recordsLoading = available.some(([id]) => id === active) && !loadedTools.includes(active)
+  useEffect(() => { if (!user) return; const cached = readCachedSpaceDashboards(user.uid); if (cached.length) { setSpaces(cached); setLoading(false) }; void listAccessibleSpaceDashboards(user.uid).then(next => { setSpaces(next); if (!spaceId && next[0]) navigate(`/spaces/${next[0].id}/workspace`, { replace: true }) }).finally(() => setLoading(false)) }, [navigate, spaceId, user])
+  useEffect(() => { if (available.length && !available.some(([id]) => id === active)) setActive(available[0][0]) }, [active, available])
+  useEffect(() => { if (!space || available.length === 0) return; let current = true; setRecordsByTool({}); setLoadedTools([]); available.forEach(([tool]) => { void listSpaceWorkspaceRecords(space.id, tool).then(records => { if (current) setRecordsByTool(existing => ({ ...existing, [tool]: records })) }).catch(() => { if (current) setRecordsByTool(existing => ({ ...existing, [tool]: [] })) }).finally(() => { if (current) setLoadedTools(existing => existing.includes(tool) ? existing : [...existing, tool]) }) }); return () => { current = false } }, [available, space])
+  if (loading) return <main className="centered-state"><div className="state-card"><div className="spinner" /><h2>Loading your Space</h2></div></main>
+  if (!space) return <main className="centered-state"><div className="state-card"><h2>Space unavailable</h2><p>This Space is no longer available to you.</p></div></main>
+  return <div className="app-page"><header className="topbar"><Brand compact /></header><main className="workspace-page"><Link className="back-link" to={`/spaces/${space.id}`}><ArrowLeft size={16} /> Back to {space.name}</Link><div className="workspace-heading"><div><span className="eyebrow">Space workspace</span><h1>{space.name}</h1></div><p>See the same work and updates that are in this Space.</p></div><div className="workspace-layout"><aside className="workspace-sidebar"><span className="workspace-sidebar-label">Workspace tools</span><nav className="workspace-tabs" aria-label="Workspace tools">{available.map(([id, title, Icon]) => <button key={id} className={active === id ? 'active' : ''} onClick={() => setActive(id)}><Icon size={17} />{title}</button>)}</nav><div className="workspace-enabled"><span>Also enabled</span><div>{space.enabledModuleIds.filter(id => !available.some(([tool]) => tool === id)).map(id => <small key={id}>{moduleNames[id] ?? id}</small>)}</div></div></aside><section className="panel workspace-list"><div className="workspace-content-heading"><div><h2>{activeTitle}</h2><p>{records.length ? `${records.length} item${records.length === 1 ? '' : 's'}` : 'No items yet'}</p></div></div>{recordsLoading ? <p className="inline-empty">Loading…</p> : records.length ? <div className="workspace-record-list">{records.map(record => <WorkspaceRecord key={record.id} record={record} tool={active} spaceId={space.id} />)}</div> : <div className="workspace-empty"><CalendarDays size={22} /><strong>No {activeTitle.toLowerCase()} yet</strong><p>Items created in theSpaces. will appear here.</p></div>}</section></div></main></div>
+}

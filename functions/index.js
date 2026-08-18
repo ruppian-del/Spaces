@@ -30,6 +30,71 @@ const FREE_ORGANIZATION_ENTITLEMENTS = Object.freeze({
 });
 const FOUNDATION_MODULE_IDS = Object.freeze(["general", "events", "polls", "activity", "members", "settings"]);
 
+exports.downloadWorkspaceAsset = functions.https.onRequest(async (request, response) => {
+  if (request.method !== "GET") {
+    response.status(405).send("Method not allowed");
+    return;
+  }
+
+  const token = stringValue(request.header("authorization")).match(/^Bearer\s+(.+)$/i)?.[1];
+  const spaceId = stringValue(request.query.spaceId).trim();
+  const fileId = stringValue(request.query.fileId).trim();
+  if (!token || !spaceId || !fileId) {
+    response.status(400).send("A signed-in user, Space, and file are required.");
+    return;
+  }
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    const firestore = admin.firestore();
+    const spaceRef = firestore.collection("spaces").doc(spaceId);
+    const [spaceSnapshot, memberSnapshot, fileSnapshot] = await Promise.all([
+      spaceRef.get(),
+      spaceRef.collection("members").doc(decodedToken.uid).get(),
+      spaceRef.collection("files").doc(fileId).get(),
+    ]);
+    if (!spaceSnapshot.exists || !fileSnapshot.exists || fileSnapshot.get("deleted") === true) {
+      response.status(404).send("The requested file is unavailable.");
+      return;
+    }
+
+    const memberRole = stringValue(memberSnapshot.get("role"));
+    let authorized = memberRole === "owner" || memberRole === "admin";
+    const organizationId = stringValue(spaceSnapshot.get("organizationId")).trim();
+    if (!authorized && organizationId) {
+      const organizationMember = await firestore.collection("organizations").doc(organizationId).collection("members").doc(decodedToken.uid).get();
+      const organizationRole = stringValue(organizationMember.get("role"));
+      authorized = organizationRole === "primary_admin" || organizationRole === "admin";
+    }
+    if (!authorized) {
+      response.status(403).send("You do not have access to this Space file.");
+      return;
+    }
+
+    const storagePath = stringValue(fileSnapshot.get("storagePath")).trim();
+    if (!storagePath) {
+      response.status(404).send("This file does not have a stored asset.");
+      return;
+    }
+    const file = admin.storage().bucket().file(storagePath);
+    const [metadata] = await file.getMetadata();
+    response.status(200);
+    response.set("Cache-Control", "private, no-store");
+    response.set("Content-Type", "text/plain; charset=utf-8");
+    if (metadata.size) response.set("Content-Length", metadata.size);
+    file.createReadStream()
+      .on("error", (error) => {
+        logger.error("Unable to stream Workspace file", { spaceId, fileId, errorMessage: error.message });
+        if (!response.headersSent) response.status(502).send("The stored file could not be read.");
+        else response.destroy(error);
+      })
+      .pipe(response);
+  } catch (error) {
+    logger.error("Workspace file download failed", { spaceId, fileId, errorMessage: error instanceof Error ? error.message : String(error) });
+    if (!response.headersSent) response.status(500).send("The file could not be loaded.");
+  }
+});
+
 exports.createOrganizationCheckout = functions
   .runWith({ secrets: ["STRIPE_SECRET_KEY"] })
   .https.onCall(async (data, context) => {

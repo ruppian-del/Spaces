@@ -11,6 +11,13 @@
     "trailingSlash": false,
     "rewrites": [
       {
+        "source": "/api/workspace-assets",
+        "function": {
+          "functionId": "downloadWorkspaceAsset",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

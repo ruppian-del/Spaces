@@ -90,6 +90,24 @@ export interface SpaceDashboardInvite {
   expiresAt: Date
 }
 
+export interface SpaceWorkspaceRecord {
+  id: string
+  title: string
+  detail: string
+  metadata: string[]
+  createdAt: Date | null
+  updatedAt?: Date | null
+  pollResults?: { label: string; votes: number; percent: number }[]
+  totalVotes?: number
+  allDay?: boolean
+  endDate?: Date | null
+  itemSummary?: { completed: number; total: number; items: { title: string; completed: boolean; dueDate: Date | null }[] }
+  author?: string
+  reactions?: { emoji: string; count: number }[]
+  comments?: { author: string; body: string }[]
+  asset?: { storagePath: string; nonce: string; mimeType: string; filename: string; recordId?: string; thumbnailUrl?: string }
+}
+
 
 export interface SpaceDashboardActivity {
   id: string
